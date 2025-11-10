@@ -1,0 +1,34 @@
+/* frontend/src/App.css */
+
+.App {
+  text-align: center;
+  background-color: #282c34;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(10px + 2vmin);
+  color: white;
+}
+
+.App-header {
+  padding: 20px;
+}
+
+.activate-button {
+  background-color: #61dafb; /* A nice blue color */
+  color: #282c34; /* Dark text */
+  font-size: 24px;
+  font-weight: bold;
+  border: none;
+  border-radius: 50px;
+  padding: 20px 40px;
+  cursor: pointer;
+  margin-top: 40px;
+  transition: transform 0.2s; /* Smooth animation */
+}
+
+.activate-button:hover {
+  transform: scale(1.05); /* Slightly enlarge the button on hover */
+}
