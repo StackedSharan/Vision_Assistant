@@ -1,85 +1,63 @@
-# backend/app.py (Final, Clean Version)
+# backend/app.py (With Detailed Debugging)
 
-from flask import Flask, jsonify
-import cv2
+# ... (all your imports are the same) ...
+# --- Path Hack and Imports ---
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+import cv2, numpy as np, base64, io
+from PIL import Image
+from backend.modules.object_detection import ObjectDetector
+from backend.modules.voice_assistant import VoiceAssistant
+from backend.modules.navigator import Navigator
 
-# Import our custom modules
-from modules.object_detection import ObjectDetector
-from modules.voice_assistant import VoiceAssistant
-
-# --- Initialization ---
+# ... (Initialization is the same) ...
 app = Flask(__name__)
-
-print("Loading AI Models...")
+CORS(app)
+# ... (loading models is the same) ...
 detector = ObjectDetector()
-assistant = VoiceAssistant()
-print("Models loaded successfully.")
-# --- End of Initialization ---
+# ... etc ...
 
-@app.route('/')
-def index():
-    return "Flask Server is Running! The main interactive endpoint is /api/assistant"
+# ... (get_route endpoint is the same) ...
 
-def format_detections_for_speech(detections):
-    if not detections:
-        return "I don't see anything noteworthy."
-    detection_counts = {}
-    for item in detections:
-        obj_name = item.split(' ')[0]
-        detection_counts[obj_name] = detection_counts.get(obj_name, 0) + 1
-    parts = []
-    for obj, count in detection_counts.items():
-        if count > 1:
-            parts.append(f"{count} {obj}s")
-        else:
-            parts.append(f"a {obj}")
-    if len(parts) > 1:
-        speech_text = "I see " + ", ".join(parts[:-1]) + " and " + parts[-1] + "."
-    else:
-        speech_text = "I see " + parts[0] + "."
-    return speech_text
+# --- MODIFIED OBSTACLE CHECKER ENDPOINT ---
+@app.route('/api/check_obstacle', methods=['POST'])
+def check_obstacle():
+    data = request.get_json()
+    if not data or 'image' not in data:
+        return jsonify({'obstacles': []})
 
-@app.route('/api/assistant', methods=['GET'])
-def interactive_assistant():
-    """Listens for a command and responds intelligently."""
-    print("=========================================")
-    print("Request received for /api/assistant")
-    
     try:
-        assistant.speak("How can I help you?")
-        command = assistant.listen()
+        image_data = base64.b64decode(data['image'])
+        image = Image.open(io.BytesIO(image_data))
+        frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+        # --- THIS IS THE NEW DEBUGGING PART ---
+        # 1. Run detection with a LOWER threshold for debugging
+        all_detections = detector.detect(frame, threshold=0.4) 
         
-        if command and "what's around me" in command.lower():
-            assistant.speak("Okay, looking around now.")
-            
-            cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                err_msg = "Sorry, I am having trouble accessing the camera."
-                assistant.speak(err_msg)
-                return jsonify({'error': 'Could not open camera.'}), 500
-            ret, frame = cap.read()
-            cap.release()
-            if not ret:
-                err_msg = "Sorry, I could not capture an image."
-                assistant.speak(err_msg)
-                return jsonify({'error': 'Failed to capture frame.'}), 500
-                
-            detections = detector.detect(frame)
-            speech_response = format_detections_for_speech(detections)
-            assistant.speak(speech_response)
-            
-            return jsonify({'command_received': command, 'response': speech_response})
-            
-        else:
-            response_text = "Sorry, I did not understand that command. Please ask, 'what's around me?'"
-            assistant.speak(response_text)
-            return jsonify({'command_received': command, 'response': response_text})
+        # 2. Print EVERYTHING the model found
+        print("\n-------------------------------------------")
+        print(f"--- All Detections Found (Threshold > 0.4): {all_detections} ---")
+        print("-------------------------------------------\n")
+        # --- END OF DEBUGGING PART ---
+
+        obstacles = []
+        for det in all_detections:
+            # We still only alert for significant obstacles with high confidence
+            if det['name'] in ['person', 'car', 'bicycle', 'motorcycle', 'bus', 'truck'] and det['score'] > 0.6:
+                obstacles.append(det['name'])
+        
+        return jsonify({'obstacles': obstacles})
 
     except Exception as e:
-        print(f"An error occurred in the assistant loop: {e}")
-        error_message = "I have run into an unexpected error. Please try again."
-        assistant.speak(error_message)
-        return jsonify({'error': str(e)}), 500
+        print(f"Error in check_obstacle: {e}")
+        return jsonify({'obstacles': []})
 
+# ... (the rest of the file is the same) ...
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # ... (code to run the app is the same) ...
+    print("Starting Flask server...")
+    app.run(host='0.0.0.0', port=5001, debug=False)

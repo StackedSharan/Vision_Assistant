@@ -1,92 +1,61 @@
-// frontend/src/App.js
+// frontend/src/App.js (FINAL VERSION)
 
 import React, { useState } from 'react';
 import './App.css';
 
 function App() {
-  const [statusMessage, setStatusMessage] = useState('Say "remember this place as [name]"');
+  const [statusMessage, setStatusMessage] = useState('Press the button to start the assistant.');
   const [isAssistantActive, setIsAssistantActive] = useState(false);
 
+  // Helper function to get GPS location
   const getCurrentLocation = () => {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) {
-        reject(new Error("Geolocation is not supported."));
-      } else {
-        navigator.geolocation.getCurrentPosition(
-          (position) => resolve(position.coords),
-          () => reject(new Error("Unable to retrieve your location."))
-        );
+        return reject(new Error("Geolocation is not supported."));
       }
+      navigator.geolocation.getCurrentPosition(
+        (position) => resolve(position.coords),
+        () => reject(new Error("Unable to retrieve your location. Please grant permission."))
+      );
     });
   };
-  
-  // This is a new helper function for our new API call
-  const sendPlaceToBackend = async (placeName, location) => {
-    const { latitude, longitude } = location;
-    
-    // This is a POST request, so we need to configure it with more options
-    const response = await fetch('http://localhost:5000/api/remember_place', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json', // Tell the server we're sending JSON
-      },
-      // The data we are sending needs to be a string, so we use JSON.stringify
-      body: JSON.stringify({
-        name: placeName,
-        latitude: latitude,
-        longitude: longitude,
-      }),
-    });
 
-    if (!response.ok) {
-      throw new Error("Failed to save the location on the backend.");
-    }
-    
-    return response.json(); // Return the success message from the server
-  };
-
-
+  // The main function that triggers the entire interactive assistant
   const handleStartAssistant = async () => {
     if (isAssistantActive) return;
 
     setIsAssistantActive(true);
-    setStatusMessage('First, getting your location...');
+    setStatusMessage('Getting your location...');
 
     try {
-      // 1. Get current GPS location
       const location = await getCurrentLocation();
-      setStatusMessage('Location found. Now, please speak your command...');
+      setStatusMessage('Location found. Activating assistant...');
 
-      // In a real app, we would call the /api/listen endpoint here.
-      // For this test, we will use a prompt to simulate the voice command.
-      const command = prompt("Please enter your command now:", "remember this place as home");
+      // Call the single, powerful backend endpoint, sending the location
+      const response = await fetch('http://localhost:5001/api/interactive_assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          latitude: location.latitude,
+          longitude: location.longitude,
+        }),
+      });
 
-      // 2. Parse the command to see if it's our "remember" command
-      if (command && command.toLowerCase().startsWith('remember this place as')) {
-        // Extract the name of the place from the command string
-        const placeName = command.substring('remember this place as'.length).trim();
-        
-        if (placeName) {
-          setStatusMessage(`Trying to remember this place as "${placeName}"...`);
-          
-          // 3. Call our new function to send the data to the backend
-          const result = await sendPlaceToBackend(placeName, location);
-          
-          // 4. Display the confirmation message from the server
-          setStatusMessage(result.message);
-
-        } else {
-          setStatusMessage("You need to provide a name, like 'remember this place as home'.");
-        }
-      } else {
-        // Here is where we would handle other commands like "what's around me?"
-        setStatusMessage("I didn't understand that command. Please try again.");
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
       }
+      
+      const data = await response.json();
+      console.log("Final response from backend:", data);
+
+      // Display the final outcome of the conversation
+      setStatusMessage(`Interaction finished. Last response: "${data.response}"`);
 
     } catch (error) {
-      console.error("Error:", error.message);
-      setStatusMessage(error.message);
+      console.error("Error during interaction:", error.message);
+      setStatusMessage(`Error: ${error.message}`);
     } finally {
+      // Re-enable the button for the next interaction
       setIsAssistantActive(false);
     }
   };
@@ -96,13 +65,8 @@ function App() {
       <header className="App-header">
         <h1>Vision Assistant</h1>
         <p>{statusMessage}</p>
-        
-        <button 
-          className="activate-button" 
-          onClick={handleStartAssistant} 
-          disabled={isAssistantActive}
-        >
-          {isAssistantActive ? 'Working...' : 'Activate Assistant'}
+        <button className="activate-button" onClick={handleStartAssistant} disabled={isAssistantActive}>
+          {isAssistantActive ? 'Assistant is Active...' : 'Activate Assistant'}
         </button>
       </header>
     </div>
