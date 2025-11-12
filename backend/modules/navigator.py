@@ -1,122 +1,96 @@
-# backend/modules/navigator.py (FINAL VERSION)
+# backend/modules/navigator.py (SUPER DEBUGGING VERSION)
 
-import geojson
+import json
 import networkx as nx
 from geopy.distance import geodesic
-from backend.config import PROJECT_ROOT
-import os
-import math # Needed for calculating angles
-
-MAP_FILE_PATH = os.path.join(PROJECT_ROOT, 'backend', 'models', 'map.geojson')
+import math
 
 class Navigator:
-    def __init__(self):
-        """Initializes the Navigator by loading the map and building the graph."""
-        if not os.path.exists(MAP_FILE_PATH):
-            raise FileNotFoundError(f"Map file not found at: {MAP_FILE_PATH}")
+    def __init__(self, map_path):
+        print("\n--- Initializing Navigator ---")
+        self.graph, self.node_locations = self._build_graph_from_geojson(map_path)
+        print("--------------------------------------------------")
+        print("Navigator initialized. Graph build process complete.")
+        print(f"Final Graph has {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
+        print(f"Loaded landmark names: {list(self.graph.nodes())}")
+        print("--------------------------------------------------\n")
 
-        self.graph = nx.Graph()
-        self.node_data = {}
+    def _build_graph_from_geojson(self, file_path):
+        print("DEBUG: Starting to build graph from GeoJSON...")
+        graph = nx.Graph()
+        node_locations = {}
 
-        print("Initializing Navigator: Loading map and building graph...")
-        self._load_map()
-        print(f"Navigator initialized. Graph has {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
+        with open(file_path) as f:
+            data = json.load(f)
 
-    def _load_map(self):
-        """Parses the GeoJSON file and populates the graph."""
-        with open(MAP_FILE_PATH) as f:
-            data = geojson.load(f)
-
+        # First pass: Add all nodes (Points)
+        print("DEBUG (Pass 1): Finding all landmarks (Points)...")
         for feature in data['features']:
             if feature['geometry']['type'] == 'Point':
-                properties = feature['properties']
+                node_id = feature['properties']['name']
                 coords = feature['geometry']['coordinates']
-                node_id = properties.get('name')
-                if not node_id:
-                    continue
-                self.node_data[node_id] = {'name': node_id, 'coords': (coords[1], coords[0])}
-                self.graph.add_node(node_id)
+                node_locations[node_id] = (coords[1], coords[0])  # (lat, lon)
+                graph.add_node(node_id, pos=coords)
+                print(f"  > Found node '{node_id}' at coordinates {coords}")
 
+        # Second pass: Add all edges (LineStrings)
+        print("\nDEBUG (Pass 2): Finding all paths (LineStrings) and creating edges...")
         for feature in data['features']:
             if feature['geometry']['type'] == 'LineString':
-                path_coords = feature['geometry']['coordinates']
-                start_node_id = self._find_closest_node((path_coords[0][1], path_coords[0][0]))
-                end_node_id = self._find_closest_node((path_coords[-1][1], path_coords[-1][0]))
-                if start_node_id and end_node_id and start_node_id != end_node_id:
-                    start_coords = self.node_data[start_node_id]['coords']
-                    end_coords = self.node_data[end_node_id]['coords']
-                    distance = geodesic(start_coords, end_coords).meters
-                    self.graph.add_edge(start_node_id, end_node_id, weight=distance)
+                points = feature['geometry']['coordinates']
+                start_coord = tuple(points[0])
+                end_coord = tuple(points[1])
+                print(f"  > Found a path from coords {start_coord} to {end_coord}")
 
-    def _find_closest_node(self, coords, search_radius_m=20):
-        """Finds the ID of the closest named node."""
-        for node_id, data in self.node_data.items():
-            if geodesic(coords, data['coords']).meters < search_radius_m:
-                return node_id
-        return None
+                start_node, end_node = None, None
+                for node, attrs in graph.nodes(data=True):
+                    if attrs['pos'] == list(start_coord): start_node = node
+                    if attrs['pos'] == list(end_coord): end_node = node
+                
+                if start_node and end_node:
+                    # If we found matching nodes for both ends of the line...
+                    start_latlon = node_locations[start_node]
+                    end_latlon = node_locations[end_node]
+                    distance = geodesic(start_latlon, end_latlon).meters
+                    graph.add_edge(start_node, end_node, weight=distance)
+                    print(f"    ✅ SUCCESS: Created edge between '{start_node}' and '{end_node}'")
+                else:
+                    # This is the critical error message!
+                    print(f"    ❌ FAILED to create edge. Could not find matching nodes for this path.")
+                    if not start_node: print(f"      - No existing landmark found at start coordinate {start_coord}")
+                    if not end_node: print(f"      - No existing landmark found at end coordinate {end_coord}")
 
-    def _calculate_bearing(self, pointA, pointB):
-        """Calculates the bearing (direction) between two points."""
-        lat1, lon1 = math.radians(pointA[0]), math.radians(pointA[1])
-        lat2, lon2 = math.radians(pointB[0]), math.radians(pointB[1])
-        dLon = lon2 - lon1
-        x = math.sin(dLon) * math.cos(lat2)
-        y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLon)
-        bearing = math.atan2(x, y)
-        bearing = math.degrees(bearing)
-        bearing = (bearing + 360) % 360
-        return bearing
-
-    def _bearing_to_direction(self, bearing):
-        """Converts a numerical bearing to a compass direction."""
-        if 22.5 <= bearing < 67.5: return "North-East"
-        if 67.5 <= bearing < 112.5: return "East"
-        if 112.5 <= bearing < 157.5: return "South-East"
-        if 157.5 <= bearing < 202.5: return "South"
-        if 202.5 <= bearing < 247.5: return "South-West"
-        if 247.5 <= bearing < 292.5: return "West"
-        if 292.5 <= bearing < 337.5: return "North-West"
-        return "North"
-
-    # --- THIS IS THE NEW, FINAL FUNCTION ---
-    def get_route(self, start_node_id, end_node_id):
-        """
-        Calculates the shortest path between two nodes and returns a list
-        of human-readable turn-by-turn directions.
-        """
+        return graph, node_locations
+    
+    # ... (the rest of the file remains the same) ...
+    def find_shortest_path(self, start_node, end_node):
         try:
-            # 1. Use Dijkstra's algorithm to find the shortest path of node IDs
-            path = nx.dijkstra_path(self.graph, source=start_node_id, target=end_node_id, weight='weight')
-            
-            directions = []
-            
-            # 2. Go through the path and generate directions for each segment
-            for i in range(len(path) - 1):
-                current_node_id = path[i]
-                next_node_id = path[i+1]
-                
-                # Get data for the current and next nodes
-                current_node_data = self.node_data[current_node_id]
-                next_node_data = self.node_data[next_node_id]
-                
-                # Get the distance of this path segment
-                distance = self.graph[current_node_id][next_node_id]['weight']
-                
-                # Calculate the direction
-                bearing = self._calculate_bearing(current_node_data['coords'], next_node_data['coords'])
-                direction = self._bearing_to_direction(bearing)
-                
-                # Create the instruction
-                instruction = (f"From {current_node_id}, walk {direction} for about "
-                               f"{int(round(distance, -1))} meters to reach {next_node_id}.")
-                directions.append({"instruction": instruction})
+            path_nodes = nx.dijkstra_path(self.graph, source=start_node, target=end_node, weight='weight')
+            instructions = []
+            # ... (rest of the function)
+            for i in range(len(path_nodes) - 1):
+                current_node_name = path_nodes[i]
+                next_node_name = path_nodes[i+1]
+                lat1, lon1 = self.node_locations[current_node_name]
+                lat2, lon2 = self.node_locations[next_node_name]
+                distance = self.graph[current_node_name][next_node_name]['weight']
+                bearing = self._calculate_bearing(math.radians(lat1), math.radians(lon1), math.radians(lat2), math.radians(lon2))
+                direction = self._get_compass_direction(bearing)
+                instruction = f"Walk {direction} for {round(distance)} meters towards {next_node_name.replace('_', ' ')}."
+                instructions.append(instruction)
+            return instructions
+        except (nx.NodeNotFound, nx.NetworkXNoPath):
+            return None
 
-            # Add a final instruction for arrival
-            directions.append({"instruction": f"You have arrived at {end_node_id}."})
-            
-            return {'status': 'success', 'route': directions}
+    def _calculate_bearing(self, lat1, lon1, lat2, lon2):
+        d_lon = lon2 - lon1
+        y = math.sin(d_lon) * math.cos(lat2)
+        x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(d_lon)
+        brng = math.atan2(y, x)
+        brng = math.degrees(brng)
+        return (brng + 360) % 360
 
-        except nx.NetworkXNoPath:
-            return {'status': 'error', 'message': f"No path found between {start_node_id} and {end_node_id}."}
-        except KeyError as e:
-            return {'status': 'error', 'message': f"Location not found: {e}. Please check the names."}
+    def _get_compass_direction(self, bearing):
+        dirs = ["North", "Northeast", "East", "Southeast", "South", "Southwest", "West", "Northwest"]
+        index = round(bearing / 45) % 8
+        return dirs[index]
