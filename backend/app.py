@@ -1,102 +1,143 @@
-# backend/app.py (FINAL VERSION with Navigation)
-
-from flask import Flask, request
-from flask_cors import CORS
+from flask import Flask
+from flask_socketio import SocketIO, emit
 import base64
 import cv2
 import numpy as np
 import os
+import tensorflow as tf
+from modules.navigator import Navigator
 
-# --- Import your custom AI modules ---
-from modules.landmark_recognizer import LandmarkRecognizer
-from modules.navigator import Navigator # <-- IMPORT THE NAVIGATOR
+# --- Object Detector Class ---
+class ObjectDetector:
+    def __init__(self, model_filename='ssd_mobilenet_v2.tflite', label_filename='coco_labels.txt'):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(base_dir, 'models', model_filename)
+        label_path = os.path.join(base_dir, 'models', label_filename)
+        self.CALIBRATED_FOCAL_LENGTH = 600
+        self.KNOWN_WIDTHS = {"person": 0.5, "car": 1.8, "bicycle": 0.6, "bottle": 0.07}
+        self.interpreter = tf.lite.Interpreter(model_path=model_path)
+        self.interpreter.allocate_tensors()
+        self.input_details = self.interpreter.get_input_details()
+        self.output_details = self.interpreter.get_output_details()
+        _, self.height, self.width, _ = self.input_details[0]['shape']
+        with open(label_path, 'r') as f:
+            self.labels = [line.strip() for line in f.readlines()]
+        print("✅ Object Detector Initialized.")
 
-# --- SETUP FLASK APP ---
+    def detect(self, image_frame):
+        image_height, image_width, _ = image_frame.shape
+        input_image = cv2.resize(image_frame, (self.width, self.height))
+        input_data = np.expand_dims(input_image, axis=0)
+        self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
+        self.interpreter.invoke()
+        boxes = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
+        classes = self.interpreter.get_tensor(self.output_details[1]['index'])[0]
+        scores = self.interpreter.get_tensor(self.output_details[2]['index'])[0]
+        detections = []
+        for i in range(len(scores)):
+            if scores[i] > 0.5 and int(classes[i]) < len(self.labels) and self.labels[int(classes[i])] in self.KNOWN_WIDTHS:
+                object_name = self.labels[int(classes[i])]
+                ymin, xmin, ymax, xmax = boxes[i]
+                
+                ### MODIFIED ### - Calculate the horizontal center of the object
+                # xmax and xmin are proportions (0.0 to 1.0) of the image width.
+                center_x = (xmin + xmax) / 2.0
+                
+                object_pixel_width = int((xmax - xmin) * image_width)
+                distance = (self.KNOWN_WIDTHS[object_name] * self.CALIBRATED_FOCAL_LENGTH) / object_pixel_width
+                
+                ### MODIFIED ### - Add the position to the returned data
+                detections.append({'name': object_name, 'distance': float(distance), 'position_x': float(center_x)})
+                
+        return detections
+
+# --- SETUP AND INITIALIZATION ---
 app = Flask(__name__)
-CORS(app) 
-
-# --- INITIALIZE AI MODULES ---
-print("--- Initializing AI modules... ---")
-
-# This makes our file paths robust and independent of where the script is run from
-base_dir = os.path.dirname(os.path.abspath(__file__))
-
-# 1. Initialize the Landmark Recognizer
-try:
-    model_path = os.path.join(base_dir, 'models', 'model.tflite')
-    labels_path = os.path.join(base_dir, 'models', 'labels.txt')
-    landmark_recognizer = LandmarkRecognizer(model_path=model_path, labels_path=labels_path)
-except Exception as e:
-    print(f"!!! CRITICAL ERROR: Could not initialize LandmarkRecognizer: {e}")
-    landmark_recognizer = None
-
-# 2. Initialize the Navigator
-try:
-    map_path = os.path.join(base_dir, 'models', 'map.geojson')
-    navigator = Navigator(map_path=map_path)
-except Exception as e:
-    print(f"!!! CRITICAL ERROR: Could not initialize Navigator: {e}")
-    navigator = None
-
-print("--- All modules initialized. Server is ready. ---")
+socketio = SocketIO(app, cors_allowed_origins="*")
+object_detector = ObjectDetector()
+navigator = Navigator(map_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'map.geojson'))
+print("✅ Navigator Initialized.")
 
 
-# --- API ENDPOINTS ---
-
-@app.route('/api/confirm_position', methods=['POST'])
-def confirm_position():
-    # ... (This endpoint is complete and correct)
-    if not landmark_recognizer:
-        return {'error': 'Landmark Recognizer is not available.'}, 500
-    try:
-        # ... (rest of the function)
-        image_b64 = request.json['image']
-        image_bytes = base64.b64decode(image_b64.split(',')[1])
-        np_arr = np.frombuffer(image_bytes, np.uint8)
-        image_frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if image_frame is None: return {'error': 'Failed to decode image.'}, 400
-        landmark, confidence = landmark_recognizer.predict_landmark(image_frame)
-        return {'landmark': landmark, 'confidence': float(confidence)}
-    except Exception as e:
-        print(f"Error during position confirmation: {e}")
-        return {'error': 'An internal error occurred.'}, 500
-
-# --- THIS IS THE NEW, FULLY IMPLEMENTED ENDPOINT ---
-@app.route('/api/start_navigation', methods=['POST'])
-def start_navigation():
+### MODIFIED ### - New helper function to get a direction label
+def get_position_label(x_coordinate):
     """
-    Receives a start and end landmark, uses the Navigator to find a route,
-    and returns a list of instructions.
+    Takes a horizontal coordinate (from 0.0 to 1.0) and returns a human-readable position.
     """
-    if not navigator:
-        return {'error': 'Navigation module is not available.'}, 500
+    if x_coordinate < 0.35:
+        return "to your left"
+    elif x_coordinate > 0.65:
+        return "to your right"
+    else:
+        return "in front of you"
 
-    data = request.json
-    start_landmark = data.get('start_landmark')
-    end_landmark = data.get('end_landmark')
+### MODIFIED ### - The "brain" is now smarter
+def generate_summary(objects):
+    """
+    Turns a list of objects (which now include position) into a human-like sentence.
+    """
+    if not objects:
+        return "The path ahead looks clear."
 
-    if not start_landmark or not end_landmark:
-        return {'error': 'A start and end landmark are required.'}, 400
+    objects.sort(key=lambda x: x['distance'])
     
-    print(f"Route requested from '{start_landmark}' to '{end_landmark}'")
+    closest_obj = objects[0]
+    position_text = get_position_label(closest_obj['position_x'])
+    
+    # Create the main description with direction
+    summary = f"I see a {closest_obj['name']} {position_text}, about {closest_obj['distance']:.1f} meters away."
+    
+    # Mention other objects if they exist
+    if len(objects) > 1:
+        # We don't need to add directional info for every other object to keep it simple
+        other_object_names = [obj['name'] for obj in objects[1:]]
+        if len(other_object_names) > 1:
+            other_objects_str = ", a ".join(other_object_names[:-1]) + f", and a {other_object_names[-1]}"
+        else:
+            other_objects_str = f"a {other_object_names[0]}"
+        summary += f" There is also {other_objects_str} nearby."
 
+    return summary
+
+def decode_image_from_data_url(data_url):
+    """Decodes a Base64 image data URL into an OpenCV image."""
+    encoded_data = data_url.split(',')[1]
+    nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    return img
+
+# --- SOCKETIO EVENTS ---
+@socketio.on('connect')
+def handle_connect():
+    print('✅ Client connected')
+
+@socketio.on('describe_scene')
+def handle_describe_scene(json_data):
+    """
+    The main event handler, now uses the smarter generate_summary function.
+    """
+    print("Received 'describe_scene' request.")
     try:
-        # Use the navigator module to find the path
-        instructions = navigator.find_shortest_path(start_landmark, end_landmark)
+        image_frame = decode_image_from_data_url(json_data['image'])
+        detected_objects = object_detector.detect(image_frame)
+        summary_text = generate_summary(detected_objects)
         
-        if not instructions:
-            # This can happen if one of the landmark names doesn't exist in the map
-            error_message = f"Could not find a path. Make sure '{start_landmark}' and '{end_landmark}' exist in the map.geojson file."
-            print(f"ERROR: {error_message}")
-            return {'error': error_message}, 404
-
-        print(f"Route found: {instructions}")
-        return {'instructions': instructions}
-
+        emit('scene_summary', {'summary': summary_text})
+        print(f"Sent summary: {summary_text}")
     except Exception as e:
-        print(f"An error occurred in the navigator: {e}")
-        return {'error': 'An internal server error occurred while calculating the route.'}, 500
+        print(f"An error occurred in describe_scene: {e}")
+        emit('scene_summary', {'summary': 'Sorry, an error occurred while analyzing the scene.'})
 
+# --- Your previous event handlers are still here, just in case ---
+@socketio.on('get_navigation')
+def handle_get_navigation(data):
+    start = data.get('start')
+    end = data.get('end')
+    instructions = navigator.find_shortest_path(start, end)
+    if instructions:
+        emit('navigation_response', {'instructions': instructions})
+    else:
+        emit('navigation_response', {'error': f"Could not find a route from {start} to {end}."})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5000)
