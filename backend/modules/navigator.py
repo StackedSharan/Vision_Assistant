@@ -43,13 +43,15 @@ class Navigator:
         # For now, we will just use directions like "forward".
         return "forward"
 
-    def find_shortest_path(self, start_name, end_name):
-        start_name = start_name.lower()
-        end_name = end_name.lower()
+    # Inside your Navigator class
 
-        if start_name not in self.landmarks:
-            return None # Or return an error message
-        if end_name not in self.landmarks:
+    # Inside your Navigator class in navigator.py
+
+    def find_shortest_path(self, start_name, end_name):
+        start_name = start_name.lower().strip()
+        end_name = end_name.lower().strip()
+
+        if start_name not in self.landmarks or end_name not in self.landmarks:
             return None
 
         start_node = self.landmarks[start_name]
@@ -60,17 +62,25 @@ class Navigator:
             
             instructions = []
             for i in range(len(path_coords) - 1):
-                p1 = path_coords[i]
-                p2 = path_coords[i+1]
+                p1, p2 = path_coords[i], path_coords[i+1]
                 dist = self.graph[p1][p2]['weight']
-                direction = self.get_path_bearing(p1, p2)
                 
+                instruction_text = f"Walk {dist:.0f} meters forward."
                 node_data = self.graph.nodes[p2]
                 if node_data.get('type') == 'landmark':
-                    instructions.append(f"Walk {dist:.0f} meters {direction} to reach {node_data['name']}.")
-                else:
-                    instructions.append(f"Walk {dist:.0f} meters {direction}.")
+                    instruction_text = f"Walk {dist:.0f} meters to reach {node_data['name']}."
+
+                instructions.append({ "text": instruction_text, "coords": list(p2) })
+
+            # CRITICAL NEW FEATURE: Return instructions AND the full path for the map
+            # We must swap (lon, lat) from geojson to (lat, lon) for the Leaflet map library
+            full_path_lat_lon = [[coord[1], coord[0]] for coord in path_coords]
+
+            return {
+                "instructions": instructions,
+                "full_path": full_path_lat_lon
+            }
             
-            return instructions
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
+        except Exception as e:
+            print(f"PATHFINDING ERROR: {e}")
             return None
