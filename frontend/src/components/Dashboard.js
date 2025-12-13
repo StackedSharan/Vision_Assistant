@@ -1,103 +1,88 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import io from 'socket.io-client';
 import '../App.css';
-import MapComponent from './MapComponent';
-import { useNavigate } from 'react-router-dom';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
 
-// IMPORTANT: Replace this with your BACKEND ngrok URL (from port 5000)
-const SOCKET_URL = 'https://carmon-uncorroborant-nonmonistically.ngrok-free.dev';
+// Fix for default marker icon
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+    iconRetinaUrl: require('leaflet/dist/images/marker-icon-2x.png'),
+    iconUrl: require('leaflet/dist/images/marker-icon.png'),
+    shadowUrl: require('leaflet/dist/images/marker-shadow.png'),
+});
 
-const Dashboard = () => {
-    const [statusText, setStatusText] = useState('Where to?');
-    const [isListening, setIsListening] = useState(false);
+// Person SVG Icon
+const personIcon = new L.Icon({
+    iconUrl: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzQyODVGNCIgd2lkdGg9IjQ4cHgiIGhlaWdodD0iNDhweCI+PHBhdGggZD0iTTEyIDEyYzIuMjEgMCA0LTEuNzkgNC00cy0xLjc5LTQtNC00LTQgMS43OS00IDQgMS43OSA0IDQgNHptMCAyYy0yLjY3IDAtOCAxLjM0LTggNHYyaDE2di0yYzAtMi42Ni01LjMzLTQtOC00eiIvPjwvc3ZnPg==',
+    iconSize: [40, 40],
+    iconAnchor: [20, 40],
+    popupAnchor: [0, -40]
+});
+
+// CRITICAL: Replace this with your BACKEND ngrok URL
+// For local testing, use http://localhost:5000
+const SOCKET_URL = 'http://localhost:5000';
+
+// Helper to update map view
+function MapUpdater({ center, routeCoords }) {
+    const map = useMap();
+    useEffect(() => {
+        if (routeCoords && routeCoords.length > 0) {
+            // Create a bounds object from the route coordinates
+            const bounds = L.latLngBounds(routeCoords);
+            map.fitBounds(bounds, { padding: [50, 50] });
+        } else if (center) {
+            map.setView(center, map.getZoom());
+        }
+    }, [center, routeCoords, map]);
+    return null;
+}
+
+function Dashboard() {
+    const [mode, setMode] = useState('navigation');
+    const [statusText, setStatusText] = useState('Tap mic to speak');
     const [navInstructions, setNavInstructions] = useState([]);
+    const [routeCoords, setRouteCoords] = useState([]);
     const [currentNavStep, setCurrentNavStep] = useState(0);
-    const [routeCoords, setRouteCoords] = useState(null);
-    const [currentLocation, setCurrentLocation] = useState(null);
+    const [isListening, setIsListening] = useState(false);
     const [obstacleMessage, setObstacleMessage] = useState('');
+    const [isConnected, setIsConnected] = useState(false);
+    const [isSimulating, setIsSimulating] = useState(false);
+
+    // Map state
+    const [userLocation, setUserLocation] = useState({ lat: 12.9716, lng: 77.5946 });
 
     const videoRef = useRef(null);
     const socketRef = useRef(null);
     const requestRef = useRef(null);
-    const hasSpokenWelcome = useRef(false); // Fix for infinite loop
-    const navigate = useNavigate();
+    const hasWelcomed = useRef(false);
+    const lastMsgRef = useRef('');
+    const msgCountRef = useRef(0);
 
-    const speak = useCallback((text, interrupt = false) => {
+    // Enhanced speak function
+    const speak = useCallback((text, interrupt = false, onEnd = null) => {
         if (interrupt) window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
+        if (onEnd) utterance.onend = onEnd;
         window.speechSynthesis.speak(utterance);
     }, []);
-
-    // Initial Voice Prompt - Only once
-    useEffect(() => {
-        if (!hasSpokenWelcome.current) {
-            const timer = setTimeout(() => {
-                speak("Please tell me, where do you want to go?");
-                hasSpokenWelcome.current = true;
-            }, 1000);
-            return () => clearTimeout(timer);
-        }
-    }, [speak]);
-
-    const parseNavigationCommand = useCallback((command) => {
-        const locations = ['entrance', 'engineering block', 'architecture', 'ug block', 'canteen', 'parking', 'aiml block'];
-
-        // Logic to handle "Take me to X" or "Go from X to Y"
-        let fromLocation = locations.find(loc => command.includes(`from ${loc}`));
-        let toLocation = locations.find(loc => command.includes(`to ${loc}`));
-
-        // If "from" is missing but "to" is present (e.g. "Take me to Canteen")
-        if (!fromLocation && !toLocation) {
-            const found = locations.filter(loc => command.includes(loc));
-            if (found.length >= 2) {
-                fromLocation = found[0];
-                toLocation = found[1];
-            } else if (found.length === 1) {
-                toLocation = found[0];
-                // Use GPS if available, else default to Entrance
-                if (currentLocation) {
-                    fromLocation = currentLocation; // Send [lat, lon]
-                } else {
-                    fromLocation = "entrance";
-                }
-            }
-        } else if (!fromLocation && toLocation) {
-            // "Take me to X"
-            if (currentLocation) {
-                fromLocation = currentLocation; // Send [lat, lon]
-            } else {
-                fromLocation = "entrance";
-            }
-        }
-
-        if (fromLocation && toLocation && socketRef.current) {
-            // Clean up strings if they are strings
-            if (typeof fromLocation === 'string') fromLocation = fromLocation.replace('from ', '').trim();
-            if (typeof toLocation === 'string') toLocation = toLocation.replace('to ', '').trim();
-
-            if (fromLocation === toLocation) {
-                speak(`You are already at ${toLocation}.`);
-                return;
-            }
-
-            socketRef.current.emit('get_navigation', { start: fromLocation, end: toLocation });
-
-            const startText = typeof fromLocation === 'string' ? fromLocation : 'Current Location';
-            setStatusText(`Routing: ${startText} to ${toLocation}`);
-            speak(`Calculating route from ${startText} to ${toLocation}`);
-        } else {
-            const defaultMessage = 'Try "Go from Entrance to Canteen"';
-            setStatusText(defaultMessage);
-            speak("I didn't catch the locations. Please say something like, Go from Entrance to Canteen.");
-        }
-    }, [speak, currentLocation]);
 
     const handleVoiceCommand = useCallback(() => {
         if (isListening) return;
 
+        // Cancel any ongoing speech before listening
+        window.speechSynthesis.cancel();
+
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            alert('Speech recognition not supported.');
+            return;
+        }
         const recognition = new SpeechRecognition();
         recognition.continuous = false;
+        recognition.interimResults = false; // Only final results
         recognition.lang = 'en-US';
 
         setIsListening(true);
@@ -105,194 +90,377 @@ const Dashboard = () => {
 
         recognition.onresult = (event) => {
             const command = event.results[0][0].transcript.toLowerCase();
-            setStatusText(command);
-            parseNavigationCommand(command);
+            console.log("Command:", command);
+            setStatusText(`Heard: "${command}"`);
+
+            // Flexible NLP Parsing
+            let text = command.toLowerCase();
+            // Remove common filler words
+            text = text.replace(/^(go|navigate|walk|run|drive|please)\s+/, '');
+            text = text.replace(/^\s*from\s+/, ''); // Remove leading 'from' if present
+
+            let origin = null;
+            let destination = null;
+
+            if (text.includes(' to ')) {
+                const parts = text.split(' to ');
+                origin = parts[0].trim();
+                destination = parts[1].trim();
+            }
+
+            if (origin && destination) {
+                speak(`Navigating from ${origin} to ${destination}.`, true);
+                if (socketRef.current) {
+                    socketRef.current.emit('get_navigation', { start: origin, end: destination });
+                }
+            } else {
+                speak("I didn't catch the locations. Please try saying 'Entrance to Architecture'.", false);
+            }
         };
 
         recognition.onend = () => setIsListening(false);
-        recognition.onerror = (e) => {
-            console.error(e);
+
+        recognition.onerror = (event) => {
+            console.error("Speech recognition error", event.error);
             setIsListening(false);
-            setStatusText('Tap mic to try again');
+            setStatusText('Tap mic to speak');
         };
 
-        recognition.start();
-    }, [isListening, parseNavigationCommand]);
-
-    // Obstacle detection logic
-    const captureAndSendForObstacles = useCallback(() => {
-        if (!videoRef.current || videoRef.current.paused || videoRef.current.ended || !socketRef.current) return;
-        const canvas = document.createElement('canvas');
-        canvas.width = videoRef.current.videoWidth;
-        canvas.height = videoRef.current.videoHeight;
-        canvas.getContext('2d').drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-        const imageData = canvas.toDataURL('image/jpeg', 0.5);
-        socketRef.current.emit('process_frame_for_obstacles', { image_data: imageData });
-    }, []);
-
-    const startObstacleDetectionLoop = useCallback(() => {
-        requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
-    }, [captureAndSendForObstacles]);
-
-    useEffect(() => {
-        // Geolocation Tracking
-        if (navigator.geolocation) {
-            const watchId = navigator.geolocation.watchPosition(
-                (position) => {
-                    const { latitude, longitude } = position.coords;
-                    // Update current location [lon, lat] for GeoJSON compatibility
-                    setCurrentLocation([longitude, latitude]);
-                },
-                (error) => {
-                    console.error("Geolocation error:", error);
-                },
-                { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
-            );
-            return () => navigator.geolocation.clearWatch(watchId);
+        try {
+            recognition.start();
+        } catch (e) {
+            console.error("Recognition start failed", e);
         }
-    }, []);
+    }, [isListening, speak]);
 
     useEffect(() => {
+        let timer;
+        // Initial Voice Prompt
+        timer = setTimeout(() => {
+            speak("PLEASE TELL ME WHERE WOULD YOU LIKE TO GO", false, () => {
+                console.log("Welcome message finished. Starting mic...");
+                handleVoiceCommand();
+            });
+        }, 1000);
+
+        // Start Camera
+        const startCamera = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
+                if (videoRef.current) videoRef.current.srcObject = stream;
+            } catch (err) {
+                console.error("Camera permission denied", err);
+            }
+        };
+        startCamera();
+
+        // GPS Tracking
+        const watchId = navigator.geolocation.watchPosition(
+            (position) => {
+                const { latitude, longitude } = position.coords;
+                setUserLocation({ lat: latitude, lng: longitude });
+
+                // Send location update to backend for geofencing
+                if (socketRef.current) {
+                    socketRef.current.emit('location_update', { latitude, longitude });
+                }
+            },
+            (error) => console.error("GPS Error:", error),
+            { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
+        );
+
+        // Socket Connection
         socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
 
+        socketRef.current.on('connect', () => {
+            console.log('✅ Socket connected!');
+            setIsConnected(true);
+            speak("Connected to server.");
+        });
+
+        socketRef.current.on('disconnect', () => {
+            console.log('❌ Socket disconnected!');
+            setIsConnected(false);
+            speak("Disconnected from server.");
+        });
+
         socketRef.current.on('navigation_response', (data) => {
-            if (data.error) {
-                speak(data.error);
-                setStatusText(data.error);
-            } else {
+            console.log("Received navigation response:", data);
+            if (data.instructions && data.instructions.length > 0) {
+                console.log("Instructions found:", data.instructions);
                 setNavInstructions(data.instructions);
-                if (data.path) {
-                    setRouteCoords(data.path);
-                    // Don't overwrite current location if we are tracking GPS
-                    // But maybe snap to start of path?
-                    // For now, let GPS drive current location
+                if (data.route_coords) {
+                    console.log("Route coords found:", data.route_coords);
+                    setRouteCoords(data.route_coords);
                 }
                 setCurrentNavStep(0);
-                speak(`Starting route. ${data.instructions[0]}`);
-                startObstacleDetectionLoop();
+                speak(`Route found. First step: ${data.instructions[0].text}`);
+            } else if (data.instructions && data.instructions.length === 0) {
+                console.log("Route found but no instructions (same location?)");
+                speak("You are already at the destination.");
+                setNavInstructions([]);
+                setRouteCoords([]);
+            } else {
+                console.log("No instructions in response");
+                speak("Sorry, a route could not be found.");
             }
         });
+
+
 
         socketRef.current.on('obstacle_alert', (data) => {
             if (data.message !== 'Path is clear.') {
                 setObstacleMessage(data.message);
-                speak(data.message, true);
+
+                // Repetition Logic: Only speak the same message up to 2 times
+                if (data.message === lastMsgRef.current) {
+                    if (msgCountRef.current < 2) {
+                        speak(data.message, true);
+                        msgCountRef.current += 1;
+                    }
+                } else {
+                    // New message, reset counter
+                    lastMsgRef.current = data.message;
+                    msgCountRef.current = 1;
+                    speak(data.message, true);
+                }
             } else {
                 setObstacleMessage('');
+                lastMsgRef.current = '';
+                msgCountRef.current = 0;
             }
         });
 
-        socketRef.current.on('request_next_frame', () => {
-            if (navInstructions.length > 0) startObstacleDetectionLoop();
+        socketRef.current.on('context_update', (data) => {
+            speak(data.message, true);
         });
 
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-            .then(stream => {
-                if (videoRef.current) videoRef.current.srcObject = stream;
-            })
-            .catch(err => console.error("Camera error:", err));
+        socketRef.current.on('surroundings_analysis', (data) => {
+            console.log("Surroundings analysis:", data.message);
+            speak(data.message, true);
+        });
 
         return () => {
+            if (timer) clearTimeout(timer);
+            navigator.geolocation.clearWatch(watchId);
             if (socketRef.current) socketRef.current.disconnect();
             if (requestRef.current) cancelAnimationFrame(requestRef.current);
         };
-    }, [startObstacleDetectionLoop, navInstructions.length, speak]);
+    }, []); // Empty dependency array to run only once on mount
 
-    const handleNextStep = () => {
-        if (currentNavStep < navInstructions.length - 1) {
-            const nextStep = currentNavStep + 1;
-            setCurrentNavStep(nextStep);
-            speak(navInstructions[nextStep]);
-            if (routeCoords && routeCoords.length > nextStep) {
-                const progressIndex = Math.floor((nextStep / navInstructions.length) * routeCoords.length);
-                setCurrentLocation(routeCoords[progressIndex]);
+    // Obstacle Detection Loop (Throttled)
+    const lastCaptureTime = useRef(0);
+
+    const captureAndSendForObstacles = useCallback(() => {
+        if (!videoRef.current || !socketRef.current) return;
+
+        const now = Date.now();
+        if (now - lastCaptureTime.current < 2000) { // Run every 2 seconds
+            requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+            return;
+        }
+        lastCaptureTime.current = now;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = videoRef.current.videoWidth;
+        canvas.height = videoRef.current.videoHeight;
+        canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
+        const imageData = canvas.toDataURL('image/jpeg', 0.5);
+        socketRef.current.emit('process_frame_for_obstacles', { image_data: imageData });
+        requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+    }, []);
+
+    useEffect(() => {
+        requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+        return () => {
+            if (requestRef.current) cancelAnimationFrame(requestRef.current);
+        };
+    }, [captureAndSendForObstacles]);
+
+    // Long Press Logic
+    const longPressTimer = useRef(null);
+
+    const handleTouchStart = () => {
+        longPressTimer.current = setTimeout(() => {
+            speak("Scanning surroundings...", true);
+            // Capture frame immediately
+            if (videoRef.current && socketRef.current) {
+                const canvas = document.createElement('canvas');
+                canvas.width = videoRef.current.videoWidth;
+                canvas.height = videoRef.current.videoHeight;
+                canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
+                const imageData = canvas.toDataURL('image/jpeg', 0.8); // Higher quality for analysis
+                socketRef.current.emit('analyze_surroundings', { image_data: imageData });
             }
-        } else {
-            speak("You have arrived.");
-            setNavInstructions([]);
-            setRouteCoords(null);
-            setObstacleMessage('');
-            setStatusText('Where to?');
+        }, 800); // 800ms long press
+    };
+
+    const handleTouchEnd = () => {
+        if (longPressTimer.current) {
+            clearTimeout(longPressTimer.current);
         }
     };
 
+
+    // Helper for distance (Haversine)
+    const getDistanceFromLatLonInMeters = (lat1, lon1, lat2, lon2) => {
+        var R = 6371; // Radius of the earth in km
+        var dLat = (lat2 - lat1) * (Math.PI / 180);
+        var dLon = (lon2 - lon1) * (Math.PI / 180);
+        var a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        var d = R * c * 1000; // Distance in meters
+        return d;
+    };
+
+    // Simulation Logic
+    useEffect(() => {
+        let simTimer;
+        if (isSimulating && routeCoords.length > 0) {
+            let simIndex = 0;
+            // Find closest point on route to start simulation from, or just start from beginning
+            // For simplicity, we'll just iterate through the route coords
+            simTimer = setInterval(() => {
+                if (simIndex < routeCoords.length) {
+                    const point = routeCoords[simIndex];
+                    setUserLocation({ lat: point[0], lng: point[1] }); // Leaflet uses [lat, lng]
+                    simIndex++;
+                } else {
+                    setIsSimulating(false);
+                    clearInterval(simTimer);
+                }
+            }, 1000); // Move every 1 second
+        }
+        return () => clearInterval(simTimer);
+    }, [isSimulating, routeCoords]);
+
+    // Check for step progression
+    useEffect(() => {
+        if (navInstructions.length > 0 && currentNavStep < navInstructions.length) {
+            const target = navInstructions[currentNavStep].coords; // [lon, lat] from backend
+            // Backend sends [lon, lat], so target[1] is lat, target[0] is lon
+            const dist = getDistanceFromLatLonInMeters(userLocation.lat, userLocation.lng, target[1], target[0]);
+
+            console.log(`Distance to next waypoint: ${dist.toFixed(1)}m`);
+
+            if (dist < 15) { // 15 meters threshold
+                const nextStep = currentNavStep + 1;
+                if (nextStep < navInstructions.length) {
+                    setCurrentNavStep(nextStep);
+                    speak(navInstructions[nextStep].text, true);
+                } else {
+                    speak("You have arrived at your destination.", true);
+                    setNavInstructions([]);
+                    setRouteCoords([]);
+                    setCurrentNavStep(0);
+                    setIsSimulating(false);
+                }
+            }
+        }
+    }, [userLocation, navInstructions, currentNavStep, speak]);
+
     return (
-        <div className="App" onClick={() => {
-            // If clicking anywhere on dashboard, maybe trigger voice command if not active?
-            // User asked: "When the blind person clicks anywhere on the screen it should take to the dashboard" (already there)
-            // "It should ask for a single time command... and listen"
-            // Let's make clicking anywhere trigger listening if not already listening
-            if (!isListening) handleVoiceCommand();
-        }}>
-            <video ref={videoRef} autoPlay playsInline muted style={{ display: 'none' }} />
+        <div
+            className="dashboard-container"
+            onTouchStart={handleTouchStart}
+            onTouchEnd={handleTouchEnd}
+            onMouseDown={handleTouchStart} // For mouse testing
+            onMouseUp={handleTouchEnd}
+            onMouseLeave={handleTouchEnd}
+        >
+            <div className="connection-status" style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 1000, background: isConnected ? 'green' : 'red', padding: '5px', borderRadius: '5px', color: 'white', fontSize: '12px' }}>
+                {isConnected ? 'Online' : 'Offline'}
+            </div>
+            <video ref={videoRef} autoPlay playsInline muted className="hidden-video" />
 
             <div className="search-bar-container">
-                <div className="search-box">
-                    <span className="menu-icon" onClick={(e) => {
-                        e.stopPropagation(); // Prevent triggering voice command
-                        navigate('/'); // Go back to landing
-                    }}>⬅</span>
-                    <input
-                        type="text"
-                        className="search-input"
-                        placeholder={statusText}
-                        readOnly
+                <div className="search-bar">
+                    <span className="search-icon">🔍</span>
+                    <input type="text" placeholder="Search here" className="search-input" disabled />
+                    <span className={`mic-icon ${isListening ? 'listening' : ''}`} onClick={handleVoiceCommand}>
+                        {isListening ? '🔴' : '🎤'}
+                    </span>
+                </div>
+                <button
+                    onClick={() => {
+                        console.log("Testing route: Entrance -> Architecture");
+                        socketRef.current.emit('get_navigation', { start: 'entrance', end: 'architecture' });
+                    }}
+                    style={{ marginTop: '10px', padding: '5px 10px', background: '#4285F4', color: 'white', border: 'none', borderRadius: '5px' }}
+                >
+                    Test Route
+                </button>
+            </div>
+
+            <div className="map-wrapper">
+                <MapContainer center={[userLocation.lat, userLocation.lng]} zoom={19} scrollWheelZoom={true} style={{ height: '100%', width: '100%' }}>
+                    <TileLayer
+                        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                     />
-                    <div
-                        className={`mic-icon ${isListening ? 'listening' : ''}`}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            handleVoiceCommand();
-                        }}
-                    >
-                        🎤
-                    </div>
-                </div>
+                    <Marker position={[userLocation.lat, userLocation.lng]} icon={personIcon}>
+                        <Popup>You are here</Popup>
+                    </Marker>
+
+                    {routeCoords.length > 0 && (
+                        <>
+                            <Polyline
+                                positions={routeCoords}
+                                pathOptions={{ color: '#4285F4', weight: 6, opacity: 0.8 }}
+                            />
+                            {/* Start Point Marker */}
+                            <Marker position={routeCoords[0]}>
+                                <Popup>Start: Entrance</Popup>
+                            </Marker>
+                            {/* End Point Marker */}
+                            <Marker position={routeCoords[routeCoords.length - 1]}>
+                                <Popup>Destination</Popup>
+                            </Marker>
+                        </>
+                    )}
+
+                    <MapUpdater
+                        center={[userLocation.lat, userLocation.lng]}
+                        routeCoords={routeCoords}
+                    />
+                </MapContainer>
             </div>
 
-            <div className="map-container">
-                <MapComponent
-                    routeCoords={routeCoords}
-                    currentLocation={currentLocation}
-                />
-            </div>
+            <div className="bottom-sheet">
+                <div className="sheet-handle"></div>
+                <div className="sheet-content">
+                    <h3>{navInstructions.length > 0 ? "Navigation Active" : "Where to?"}</h3>
+                    <p className="status-text">{statusText}</p>
+                    {obstacleMessage && <div className="obstacle-alert">{obstacleMessage}</div>}
 
-            {obstacleMessage && (
-                <div className="obstacle-alert">
-                    ⚠️ {obstacleMessage}
-                </div>
-            )}
-
-            <div className="fab" onClick={(e) => {
-                e.stopPropagation();
-                if (currentLocation) console.log("Recenter");
-            }}>
-                📍
-            </div>
-
-            {navInstructions.length > 0 && (
-                <div className="bottom-card" onClick={(e) => e.stopPropagation()}>
-                    <div className="route-info">
-                        <div className="time-dist">
-                            <span className="time">12 min</span>
-                            <span className="dist">(1.2 km)</span>
+                    {navInstructions.length > 0 && (
+                        <div className="nav-step-display">
+                            <span className="direction-icon">⬆️</span>
+                            <span className="instruction-text">{navInstructions[currentNavStep].text}</span>
+                            <div className="step-indicator">Step {currentNavStep + 1} of {navInstructions.length}</div>
+                            <button
+                                onClick={() => {
+                                    const next = currentNavStep + 1;
+                                    if (next < navInstructions.length) {
+                                        setCurrentNavStep(next);
+                                        speak(navInstructions[next].text, true);
+                                    } else {
+                                        speak("You have arrived.", true);
+                                    }
+                                }}
+                                style={{ marginTop: '10px', padding: '8px', background: '#eee', border: 'none', borderRadius: '5px', width: '100%' }}
+                            >
+                                Next Step (Test) ➡️
+                            </button>
                         </div>
-                        <p className="instruction-text">
-                            {navInstructions[currentNavStep]}
-                        </p>
-                    </div>
-                    <div className="action-buttons">
-                        <button className="btn-secondary" onClick={() => {
-                            setNavInstructions([]);
-                            setRouteCoords(null);
-                            setStatusText('Where to?');
-                        }}>Exit</button>
-                        <button className="btn-primary" onClick={handleNextStep}>Next Step</button>
-                    </div>
+                    )}
                 </div>
-            )}
+            </div>
         </div>
     );
-};
+}
 
 export default Dashboard;

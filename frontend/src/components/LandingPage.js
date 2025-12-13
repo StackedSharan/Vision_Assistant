@@ -7,13 +7,13 @@ const LandingPage = () => {
 
     useEffect(() => {
         const speakWelcome = () => {
-            const text = "Welcome to Vision Assistant. Please tap anywhere on the screen to enter the Dashboard.";
+            const text = "Welcome to Vision Assistant, Please tap anywhere on the screen.";
             const utterance = new SpeechSynthesisUtterance(text);
             window.speechSynthesis.speak(utterance);
         };
 
         // Small delay to ensure browser is ready
-        const timer = setTimeout(speakWelcome, 1000);
+        const timer = setTimeout(speakWelcome, 500);
         return () => clearTimeout(timer);
     }, []);
 
@@ -24,12 +24,19 @@ const LandingPage = () => {
 
     return (
         <div className="landing-page" onClick={handleEnter}>
+            <div className="landing-background-icons"></div>
             <div className="landing-content">
-                <h1 className="landing-title">Vision Assistant</h1>
-                <p className="landing-subtitle">Superb AI Navigation</p>
-                <div className="pulse-button">
-                    Tap to Start
+                <div className="pulse-container">
+                    <div className="pulse-ring"></div>
+                    <div className="pulse-ring"></div>
+                    <div className="pulse-ring"></div>
+                    <div className="nav-icon-ball">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
+                            <polygon points="3 11 22 2 13 21 11 13 3 11"></polygon>
+                        </svg>
+                    </div>
                 </div>
+                <h1 className="landing-title">VISION ASSISTANT</h1>
             </div>
         </div>
     );
