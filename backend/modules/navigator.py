@@ -125,7 +125,8 @@ class Navigator:
                 if node_data.get('type') == 'landmark':
                     instruction_text = f"Walk {dist:.0f} meters to reach {node_data['name']}."
 
-                instructions.append({ "text": instruction_text, "coords": list(p2) })
+                # include numeric distance to help compute ETA
+                instructions.append({ "text": instruction_text, "coords": list(p2), "distance_m": float(dist) })
 
             # Swap (lon, lat) to (lat, lon) for Leaflet
             full_path_lat_lon = [[coord[1], coord[0]] for coord in path_coords]

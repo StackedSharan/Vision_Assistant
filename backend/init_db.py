@@ -16,6 +16,14 @@ CREATE TABLE IF NOT EXISTS locations (
 )
 ''')
 
+# Create a small settings table for persisted calibration and preferences
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+''')
+
 connection.commit()
 connection.close()
 
