@@ -209,6 +209,11 @@ function Dashboard() {
 
 
         socketRef.current.on('obstacle_alert', (data) => {
+            // Handle haptic feedback if vibrate_pattern is provided
+            if (data.vibrate_pattern && navigator.vibrate) {
+                navigator.vibrate(data.vibrate_pattern);
+            }
+
             if (data.message !== 'Path is clear.') {
                 setObstacleMessage(data.message);
 
@@ -271,11 +276,14 @@ function Dashboard() {
     }, []);
 
     useEffect(() => {
-        requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+        // Only start obstacle detection if a route is active (user has set a destination)
+        if (navInstructions.length > 0) {
+            requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+        }
         return () => {
             if (requestRef.current) cancelAnimationFrame(requestRef.current);
         };
-    }, [captureAndSendForObstacles]);
+    }, [captureAndSendForObstacles, navInstructions]);
 
     // Long Press Logic
     const longPressTimer = useRef(null);

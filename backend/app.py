@@ -11,10 +11,11 @@ from ultralytics import YOLO
 import sqlite3
 from config import DB_PATH
 from modules.audio_cues import compute_pan_volume
-import openai
-import numpy as np
+from modules.obstacle_filter import ObstacleFilter
+from groq import Groq
 import json
 import math
+import time
 
 # Load KB embeddings if available (lazy load)
 KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kb')
@@ -39,7 +40,9 @@ def load_kb():
 
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+else:
+    openai_client = None
 
 # --- Object Detector Class (YOLOv8) ---
 class ObjectDetector:
@@ -96,6 +99,8 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 object_detector = ObjectDetector()
 navigator = Navigator(map_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'map.geojson'))
+obstacle_filter = ObstacleFilter(max_history=5)
+current_route_coords = None  # Track active route for context filtering
 print("✅ Navigator Initialized.")
 
 # --- NEW GPS FEATURE SETUP ---
@@ -134,26 +139,46 @@ def handle_connect():
 
 @socketio.on('process_frame_for_obstacles')
 def handle_process_frame(data):
-    """Real-time obstacle detection loop."""
+    """Real-time obstacle detection loop with smart filtering."""
     try:
         image = decode_image_from_data_url(data['image_data'])
         detections = object_detector.detect(image)
         
-        # Filter for critical obstacles only to reduce noise
-        critical_objects = [d for d in detections if d.get('distance', 9999) < 3.0] # Only objects within 3 meters
-
-        if critical_objects:
-            summary = generate_summary(critical_objects)
-            # compute audio cue for the closest object
-            closest = critical_objects[0]
-            pan, volume = compute_pan_volume(closest.get('position_x', 0.5), closest.get('distance', 1.0))
+        # Apply smart filtering: urgency classification + duplicate suppression
+        filtered = obstacle_filter.filter_obstacles(detections, time.time())
+        
+        # Optional: apply context filtering if route is active
+        if current_route_coords:
+            filtered = obstacle_filter.apply_context_filtering(filtered, current_route_coords)
+        
+        if filtered:
+            # Sort by urgency: critical first
+            sorted_dets = sorted(filtered, key=lambda d: {'critical': 0, 'warning': 1}.get(d.get('urgency', 'safe'), 2))
+            
+            # Alert for the closest/most urgent obstacle
+            alert = sorted_dets[0]
+            urgency = alert.get('urgency', 'warning')
+            name = alert['name']
+            distance = alert.get('distance', 1.0)
+            
+            # Generate human-readable message
+            if urgency == 'critical':
+                message = f"⚠️ ALERT: {name} {distance:.1f}m ahead - URGENT"
+                vibrate_pattern = [200, 100, 200]  # Urgent pattern
+            else:
+                message = f"⚠️ {name} ahead, {distance:.1f}m"
+                vibrate_pattern = [100]  # Single short pulse
+            
+            # Compute audio cue for spatial awareness
+            pan, volume = compute_pan_volume(alert.get('position_x', 0.5), distance)
+            
             emit('obstacle_alert', {
-                'message': summary,
+                'message': message,
+                'urgency': urgency,
+                'vibrate_pattern': vibrate_pattern,
                 'audio': {'pan': pan, 'volume': volume}
             })
-        else:
-            # still send a small cue indicating clear path
-            emit('obstacle_alert', {'message': 'Path is clear.', 'audio': {'pan': 0.0, 'volume': 0.0}})
+        # Don't emit "clear" on every frame if no obstacles; reduces noise
             
     except Exception as e:
         print(f"Error processing frame: {e}")
@@ -204,6 +229,7 @@ def handle_analyze_surroundings(data):
 
 @socketio.on('get_navigation')
 def handle_get_navigation(data):
+    global current_route_coords
     print(f"\n📍 RECEIVED NAVIGATION REQUEST: {data}")
     start = data.get('start')
     end = data.get('end')
@@ -214,14 +240,18 @@ def handle_get_navigation(data):
         result = navigator.find_shortest_path(start, end)
         
         if result:
+            # Store route coords for context-aware obstacle filtering
+            current_route_coords = result.get('full_path', None)
             emit('navigation_response', {
                 'instructions': result['instructions'],
                 'route_coords': result['full_path']
             })
         else:
+            current_route_coords = None
             emit('navigation_response', {'error': f"Could not find a route from {start} to {end}."})
     except Exception as e:
         print(f"❌ Error in handle_get_navigation: {e}")
+        current_route_coords = None
         emit('navigation_response', {'error': str(e)})
 
 @socketio.on('location_update')
@@ -287,12 +317,12 @@ def api_eta():
 
     @app.route('/api/chat', methods=['POST'])
     def api_chat():
-        """RAG chat: accepts { query, context (optional) } and returns model answer.
-
-        Requires OPENAI_API_KEY in env. If backend/kb/ is indexed (embeddings.npy + chunks.json),
-        it will retrieve top-k contexts and include them in the prompt.
+        """RAG chat with smart navigation context.
+        
+        Request: { query, detections (optional), location (optional) }
+        Returns: { answer, retrieved }
         """
-        if not OPENAI_API_KEY:
+        if not openai_client:
             return jsonify({'error': 'OPENAI_API_KEY not configured on server'}), 500
 
         body = request.get_json(force=True)
@@ -303,14 +333,17 @@ def api_eta():
         if not query:
             return jsonify({'error': 'query required'}), 400
 
-        # 1) load KB
+        # Smart context: detect if query is navigation-related
+        nav_keywords = ['from', 'to', 'route', 'navigate', 'how long', 'distance', 'eta', 'path', 'where']
+        is_nav_query = any(kw in query.lower() for kw in nav_keywords)
+        
+        # 1) Load KB and retrieve similar chunks
         emb, chunks = load_kb()
         retrieved_texts = []
         if emb is not None and chunks is not None:
             try:
-                # get embedding for query
-                resp = openai.Embedding.create(model=os.environ.get('OPENAI_EMBEDDING_MODEL','text-embedding-3-small'), input=query)
-                q_emb = np.array(resp['data'][0]['embedding'], dtype=np.float32)
+                resp = openai_client.embeddings.create(model='text-embedding-3-small', input=query)
+                q_emb = np.array(resp.data[0].embedding, dtype=np.float32)
                 # cosine similarity
                 dists = emb.dot(q_emb) / (np.linalg.norm(emb, axis=1) * (np.linalg.norm(q_emb) + 1e-12))
                 topk = min(6, len(dists))
@@ -320,45 +353,68 @@ def api_eta():
             except Exception as e:
                 print('KB retrieval error:', e)
 
-        # assemble system prompt and user prompt
+        # Build system prompt with navigation context
         system = (
-            "You are Vision Assistant — a concise, safety-first assistant for blind users. "
-            "When answering, start with the most important action, use simple sentences, and provide distances in meters when relevant. "
-            "If user asks about navigation, rely on provided route info. If you are uncertain, say so and suggest a safe action."
+            "You are Vision Assistant — a concise, accessible assistant for blind users navigating a college campus. "
+            "Guidelines: (1) Start with the most important action; (2) Use simple, short sentences; (3) Provide distances in meters; "
+            "(4) For navigation, reference known landmarks: Main Entrance, Architecture Block (Arch), Engineering Building (Engg), "
+            "Canteen, Underground Hostel (UG), Postgraduate Building (UGPG); (5) If uncertain, suggest a safe action."
         )
 
         context_parts = []
+        
+        # Add retrieved KB context
         if retrieved_texts:
-            context_parts.append('\n--- Retrieved docs ---\n')
+            context_parts.append('=== Relevant Information ===')
             context_parts += retrieved_texts[:4]
 
+        # Add navigation-specific context if query is navigation-related
+        if is_nav_query:
+            nav_context = (
+                "=== Campus Landmarks ===\n"
+                "- Main Entrance: Primary entry point\n"
+                "- Architecture Block (Arch): Near main entrance\n"
+                "- Engineering Building (Engg): Central location\n"
+                "- Canteen: Food facility, central area\n"
+                "- UG Hostel: Residential, quieter area\n"
+                "- UGPG Building: Research/postgraduate facilities\n\n"
+                "Walking speed: ~1.2 m/s (4.3 km/h). "
+                "Example routes: Main Entrance to Canteen ~3-4 min, Engg to UG ~5-7 min."
+            )
+            context_parts.insert(0, nav_context)
+
+        # Add camera detections context
         if detections:
-            # include short summary of detections
             det_lines = []
             for d in detections[:6]:
-                det_lines.append(f"{d.get('name')} at {d.get('distance',0):.1f}m pos={d.get('position_x',0.5)}")
-            context_parts.append('\n--- Camera Detections ---\n' + '\n'.join(det_lines))
+                det_lines.append(f"  - {d.get('name')} at {d.get('distance',0):.1f}m")
+            context_parts.append(f"=== Current Obstacles ===\n" + '\n'.join(det_lines))
 
+        # Add location context
         if location:
-            context_parts.append(f"\n--- Location ---\n{location}")
+            context_parts.append(f"=== Your Location ===\n{location}")
 
-        assistant_prompt = (
-            system + "\n\n" + ("\n\n".join(context_parts)) + "\n\nUser question: " + query
-        )
+        full_context = "\n\n".join(context_parts)
 
-        # call OpenAI ChatCompletion
+        # Call OpenAI ChatCompletion with modern client
         try:
-            # Use Chat Completions API (chat.completions) or fallback to completions
-            chat_resp = openai.ChatCompletion.create(
-                model=os.environ.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini'),
-                messages=[{'role':'system','content':system}, {'role':'user','content':assistant_prompt}],
+            chat_resp = openai_client.chat.completions.create(
+                model='gpt-4o-mini',
+                messages=[
+                    {'role': 'system', 'content': system},
+                    {'role': 'user', 'content': f"{full_context}\n\nQuestion: {query}"}
+                ],
                 max_tokens=400,
                 temperature=0.2,
             )
-            answer = chat_resp['choices'][0]['message']['content']
+            answer = chat_resp.choices[0].message.content
         except Exception as e:
             print('OpenAI chat error:', e)
-            return jsonify({'error': str(e)}), 500
+            # Fallback: provide simple navigation answer based on keywords
+            if is_nav_query:
+                answer = "I can help with navigation. Try saying 'from [landmark] to [landmark]' or ask about specific landmarks like Canteen, Engineering, or Architecture Block."
+            else:
+                return jsonify({'error': str(e)}), 500
 
         return jsonify({'answer': answer, 'retrieved': len(retrieved_texts)})
 

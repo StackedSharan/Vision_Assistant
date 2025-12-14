@@ -14,7 +14,7 @@ import glob
 import time
 
 try:
-    import openai
+    from openai import OpenAI
     import numpy as np
 except Exception as e:
     print('Missing dependencies. Please install openai and numpy in backend requirements.')
@@ -28,13 +28,15 @@ if not os.path.exists(KB_DIR):
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
     raise RuntimeError('OPENAI_API_KEY must be set in environment to build KB')
-openai.api_key = OPENAI_API_KEY
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # files to index (text files and markdown)
 INCLUDE = [
     os.path.join(ROOT, 'TECH_STACK_REPORT.md'),
     os.path.join(ROOT, 'EVALUATION_PLAN.md'),
     os.path.join(ROOT, 'README.md'),
+    os.path.join(ROOT, 'NAVIGATION_GUIDE.md'),  # NEW: Navigation-specific training data
     # include backend and frontend important files
 ]
 
@@ -73,8 +75,8 @@ embeddings = []
 for i, c in enumerate(chunks):
     print(f'Embedding {i+1}/{len(chunks)}: {c["path"][:80]}...')
     try:
-        resp = openai.Embedding.create(model=EMB_MODEL, input=c['text'])
-        emb = resp['data'][0]['embedding']
+        resp = client.embeddings.create(model=EMB_MODEL, input=c['text'])
+        emb = resp.data[0].embedding
         embeddings.append(emb)
     except Exception as e:
         print('Embedding error:', e)

@@ -27,7 +27,7 @@ function ChatBox() {
   const [lastMessage, setLastMessage] = useState('');
   const videoRef = useRef(null);
   const recognitionRef = useRef(null);
-  const longPressTimer = useRef(null);
+  const lastTapTime = useRef(0);
 
   useEffect(() => {
     // setup socket listeners
@@ -205,36 +205,35 @@ function ChatBox() {
   }
 
   function handlePointerDown() {
-    // start long press timer
-    longPressTimer.current = setTimeout(() => {
+    // Detect double-tap: two taps within 300ms
+    const now = Date.now();
+    if (now - lastTapTime.current < 300) {
+      // Double-tap detected
       handleLongPressActivated();
-    }, 600);
-  }
-
-  function handlePointerUp() {
-    if (longPressTimer.current) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
     }
+    lastTapTime.current = now;
   }
 
   return (
     <>
       <video ref={videoRef} style={{display:'none'}} playsInline muted />
+      {/* Screen-wide double-tap zone for ChatBox activation */}
       <div
         onMouseDown={handlePointerDown}
-        onMouseUp={handlePointerUp}
         onTouchStart={handlePointerDown}
-        onTouchEnd={handlePointerUp}
-        aria-label="Voice assistant" 
-        style={{position:'fixed', right:18, bottom:18, width:64, height:64, borderRadius:32, background:'#0b84ff', color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', zIndex:2000}}
-      >
-        <span>{listening ? '●' : '🎙'}</span>
+        aria-label="Double-tap anywhere to activate voice assistant" 
+        style={{position:'fixed', top:0, left:0, right:0, bottom:0, zIndex:1, pointerEvents:'none'}}
+      />
+      {/* Accessibility announcement */}
+      <div aria-live="polite" aria-label="Double-tap anywhere on the screen to activate the voice assistant">
       </div>
-      <div aria-live="polite" style={{position:'fixed', right:18, bottom:92, width:260, background:'#fff', color:'#000', padding:8, borderRadius:8, boxShadow:'0 4px 10px rgba(0,0,0,0.2)'}}>
-        <strong>Assistant</strong>
-        <div style={{marginTop:6}}>{lastMessage}</div>
-      </div>
+      {/* Chat response box (only show when assistant speaks) */}
+      {lastMessage && (
+        <div aria-live="polite" style={{position:'fixed', right:18, bottom:92, width:260, background:'#fff', color:'#000', padding:8, borderRadius:8, boxShadow:'0 4px 10px rgba(0,0,0,0.2)'}}>
+          <strong>Assistant</strong>
+          <div style={{marginTop:6}}>{lastMessage}</div>
+        </div>
+      )}
     </>
   );
 }
