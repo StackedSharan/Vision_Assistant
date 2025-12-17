@@ -49,6 +49,12 @@ function ChatBox() {
       }
     });
 
+    socket.on('emergency_response', (data) => {
+      const msg = data.message;
+      setLastMessage(msg);
+      speak(msg);
+    });
+
     // prepare camera stream (hidden) so analyze_surroundings can capture frame
     async function initCamera() {
       try {
@@ -130,6 +136,12 @@ function ChatBox() {
         } else {
           speak("Camera isn't available right now.");
         }
+        return;
+      }
+
+      if (q.includes('help me')) {
+        speak("Emergency detected. Sending alert.");
+        socket.emit('emergency_alert', {}); // Backend will use last known location
         return;
       }
 

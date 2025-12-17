@@ -42,7 +42,7 @@ function MapUpdater({ center, routeCoords }) {
 
 function Dashboard() {
     const [mode, setMode] = useState('navigation');
-    const [statusText, setStatusText] = useState('Tap mic to speak');
+    const [statusText, setStatusText] = useState('Initializing...');
     const [navInstructions, setNavInstructions] = useState([]);
     const [routeCoords, setRouteCoords] = useState([]);
     const [currentNavStep, setCurrentNavStep] = useState(0);
@@ -50,6 +50,11 @@ function Dashboard() {
     const [obstacleMessage, setObstacleMessage] = useState('');
     const [isConnected, setIsConnected] = useState(false);
     const [isSimulating, setIsSimulating] = useState(false);
+    const [hasStarted, setHasStarted] = useState(true); // Auto-start in Demo Mode (transitioned from Landing)
+
+    // Voice State Machine: 'IDLE', 'LISTENING_FOR_WAKE', 'LISTENING_FOR_COMMAND', 'CONFIRMING_DESTINATION', 'NAVIGATING'
+    const [voiceState, setVoiceState] = useState('IDLE');
+    const [pendingDestination, setPendingDestination] = useState(null);
 
     // Map state
     const [userLocation, setUserLocation] = useState({ lat: 12.9716, lng: 77.5946 });
@@ -69,121 +74,168 @@ function Dashboard() {
         window.speechSynthesis.speak(utterance);
     }, []);
 
-    const handleVoiceCommand = useCallback(() => {
-        if (isListening) return;
+    // --- Voice Logic ---
+    const recognitionRef = useRef(null);
 
-        // Cancel any ongoing speech before listening
-        window.speechSynthesis.cancel();
-
+    const startContinuousListening = useCallback(() => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            alert('Speech recognition not supported.');
-            return;
-        }
+        if (!SpeechRecognition) return;
+
         const recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.interimResults = false; // Only final results
+        recognition.continuous = true; // Keep listening
+        recognition.interimResults = false;
         recognition.lang = 'en-US';
 
-        setIsListening(true);
-        setStatusText('Listening...');
-
         recognition.onresult = (event) => {
-            const command = event.results[0][0].transcript.toLowerCase();
-            console.log("Command:", command);
-            setStatusText(`Heard: "${command}"`);
+            const lastResultIdx = event.results.length - 1;
+            const transcript = event.results[lastResultIdx][0].transcript.toLowerCase().trim();
+            console.log(`🎤 Heard: "${transcript}" | State: ${voiceState}`);
 
-            // Flexible NLP Parsing
-            let text = command.toLowerCase();
-            // Remove common filler words
-            text = text.replace(/^(go|navigate|walk|run|drive|please)\s+/, '');
-            text = text.replace(/^\s*from\s+/, ''); // Remove leading 'from' if present
+            handleVoiceInput(transcript);
+        };
 
-            let origin = null;
-            let destination = null;
-
-            if (text.includes(' to ')) {
-                const parts = text.split(' to ');
-                origin = parts[0].trim();
-                destination = parts[1].trim();
-            } else {
-                origin = 'current';
-                destination = text.trim();
-            }
-
-            if (destination) {
-                if (origin === 'current') {
-                    speak(`Navigating to ${destination}.`, true);
-                } else {
-                    speak(`Navigating from ${origin} to ${destination}.`, true);
-                }
-
-                if (socketRef.current) {
-                    socketRef.current.emit('get_navigation', { start: origin, end: destination });
-                }
-            } else {
-                speak("I didn't catch the destination. Please try again.", false);
+        recognition.onend = () => {
+            // Auto-restart if supposed to be listening
+            if (hasStarted) {
+                console.log("🔄 Restarting speech recognition...");
+                try { recognition.start(); } catch (e) { }
             }
         };
 
-        recognition.onend = () => setIsListening(false);
-
-        recognition.onerror = (event) => {
-            console.error("Speech recognition error", event.error);
-            setIsListening(false);
-            setStatusText('Tap mic to speak');
+        recognition.onerror = (e) => {
+            console.warn("Speech error:", e.error);
         };
 
-        try {
-            recognition.start();
-        } catch (e) {
-            console.error("Recognition start failed", e);
+        recognitionRef.current = recognition;
+        try { recognition.start(); } catch (e) { }
+    }, [hasStarted, voiceState]); // Dependencies will be handled via refs in a real implementation to avoid restart loops, but for now this is simple.
+
+    // We need a ref for voiceState to access it inside the callback without re-binding
+    const voiceStateRef = useRef(voiceState);
+    useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
+
+    const handleVoiceCommand = () => {
+        if (!isListening) {
+            startContinuousListening();
+        } else {
+            // Maybe stop listening?
+            // recognitionRef.current.stop(); 
         }
-    }, [isListening, speak]);
+    };
 
-    useEffect(() => {
-        let timer;
-        // Initial Voice Prompt
-        timer = setTimeout(() => {
+    const handleVoiceInput = (text) => {
+        const state = voiceStateRef.current;
+        setStatusText(`Heard: "${text}"`);
+
+        // Global Commands
+        if (text.includes('stop') || text.includes('pause')) {
+            speak("Navigation paused.");
+            setVoiceState('IDLE');
+            return;
+        }
+        if (text.includes('help')) {
+            speak("I am your blind navigation assistant. Say 'Vision' to wake me up, then tell me where you want to go.");
+            return;
+        }
+        if (text.includes('emergency') || text.includes('help me')) {
+            speak("Emergency mode activated. Alert sent. Stay calm.");
+            if (socketRef.current) {
+                socketRef.current.emit('emergency_alert', { location: { lat: userLocation.lat, lng: userLocation.lng } });
+            }
+            return;
+        }
+
+        // State Machine
+        switch (state) {
+            case 'IDLE':
+            case 'LISTENING_FOR_WAKE':
+                if (text.includes('hey assist') || text.includes('vision') || text.includes('start navigation')) {
+                    speak("Yes, I'm listening. Where would you like to go?");
+                    setVoiceState('LISTENING_FOR_COMMAND');
+                }
+                break;
+
+            case 'LISTENING_FOR_COMMAND':
+                // Assume text is destination
+                const dest = text.replace(/^(go to|navigate to|take me to)\s+/, '').replace(/[.,?]/g, '');
+                setPendingDestination(dest);
+                speak(`You want to go to ${dest}. Say 'Yes' to confirm or 'Change' to pick a new destination.`);
+                setVoiceState('CONFIRMING_DESTINATION');
+                break;
+
+            case 'CONFIRMING_DESTINATION':
+                if (text.includes('yes') || text.includes('correct') || text.includes('confirm')) {
+                    speak(`Starting navigation to ${pendingDestination}.`);
+                    setVoiceState('NAVIGATING');
+                    if (socketRef.current) {
+                        socketRef.current.emit('get_navigation', { start: 'current', end: pendingDestination });
+                    }
+                } else if (text.includes('change') || text.includes('no')) {
+                    speak("Okay, where would you like to go?");
+                    setVoiceState('LISTENING_FOR_COMMAND');
+                }
+                break;
+
+            case 'NAVIGATING':
+                // Mostly silent, waiting for "Stop" or "Vision" to interrupt
+                if (text.includes('vision')) {
+                    speak("Navigation paused. What would you like to ask?");
+                    // Could switch to a CHAT mode here
+                }
+                break;
+
+            default:
+                break;
+        }
+    };
+
+    // Initialize App
+    const initializeApp = () => {
+        setHasStarted(true);
+        setVoiceState('LISTENING_FOR_WAKE');
+
+        // Auto-ask destination on load (Demo Mode)
+        setTimeout(() => {
             speak("Where do you want to go?", false, () => {
-                console.log("Welcome message finished. Starting mic...");
-                handleVoiceCommand();
+                startContinuousListening();
+                setVoiceState('LISTENING_FOR_COMMAND');
             });
         }, 1000);
 
-        // Start Camera
+        // 3. Start Camera
         const startCamera = async () => {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
                 if (videoRef.current) videoRef.current.srcObject = stream;
             } catch (err) {
                 console.error("Camera permission denied", err);
+                speak("Camera access denied. Obstacle detection will not work.");
             }
         };
         startCamera();
 
-        // GPS Tracking
+        // 4. GPS
         const watchId = navigator.geolocation.watchPosition(
             (position) => {
                 const { latitude, longitude } = position.coords;
                 setUserLocation({ lat: latitude, lng: longitude });
-
-                // Send location update to backend for geofencing
-                if (socketRef.current) {
-                    socketRef.current.emit('location_update', { latitude, longitude });
-                }
+                if (socketRef.current) socketRef.current.emit('location_update', { latitude, longitude });
             },
-            (error) => console.error("GPS Error:", error),
+            (error) => {
+                console.error("GPS Error:", error);
+                speak("GPS signal unavailable. Switching to indoor navigation mode.");
+            },
             { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
         );
+    };
 
+    useEffect(() => {
         // Socket Connection
         socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
 
         socketRef.current.on('connect', () => {
             console.log('✅ Socket connected!');
             setIsConnected(true);
-            speak("Connected to server.");
         });
 
         socketRef.current.on('disconnect', () => {
@@ -195,39 +247,16 @@ function Dashboard() {
         socketRef.current.on('navigation_response', (data) => {
             console.log("Received navigation response:", data);
             if (data.instructions && data.instructions.length > 0) {
-                console.log("Instructions found:", data.instructions);
                 setNavInstructions(data.instructions);
-                if (data.route_coords) {
-                    console.log("Route coords found:", data.route_coords);
-                    setRouteCoords(data.route_coords);
-                }
-                setCurrentNavStep(0);
+                if (data.route_coords) setRouteCoords(data.route_coords);
                 setCurrentNavStep(0);
 
-                if (data.start_message) {
-                    speak(data.start_message, true);
-                    // Also speak the first instruction after a short delay or append it?
-                    // The user flow says: "Announces notification... If you have queries long press..."
-                    // Then "With the directions".
-                    // So we should speak the notification, then the first instruction.
-                    setTimeout(() => {
-                        speak(`First step: ${data.instructions[0].text}`);
-                    }, 6000); // Wait for the long message to finish (approx)
-                } else {
-                    speak(`Route found. First step: ${data.instructions[0].text}`);
-                }
-            } else if (data.instructions && data.instructions.length === 0) {
-                console.log("Route found but no instructions (same location?)");
-                speak("You are already at the destination.");
-                setNavInstructions([]);
-                setRouteCoords([]);
+                // Speak first instruction
+                speak(`Route found. ${data.instructions[0].text}`);
             } else {
-                console.log("No instructions in response");
                 speak("Sorry, a route could not be found.");
             }
         });
-
-
 
         socketRef.current.on('obstacle_alert', (data) => {
             // Handle haptic feedback if vibrate_pattern is provided
@@ -257,22 +286,8 @@ function Dashboard() {
             }
         });
 
-        socketRef.current.on('context_update', (data) => {
-            speak(data.message, true);
-        });
-
-        socketRef.current.on('surroundings_analysis', (data) => {
-            console.log("Surroundings analysis:", data.message);
-            speak(data.message, true);
-        });
-
-        return () => {
-            if (timer) clearTimeout(timer);
-            navigator.geolocation.clearWatch(watchId);
-            if (socketRef.current) socketRef.current.disconnect();
-            if (requestRef.current) cancelAnimationFrame(requestRef.current);
-        };
     }, []); // Empty dependency array to run only once on mount
+
 
     // Obstacle Detection Loop (Throttled)
     const lastCaptureTime = useRef(0);
@@ -411,6 +426,10 @@ function Dashboard() {
             onMouseUp={handleTouchEnd}
             onMouseLeave={handleTouchEnd}
         >
+            {/* Overlay removed for Demo Mode - handled by LandingPage */
+                !hasStarted && (
+                    <div style={{ display: 'none' }} onClick={initializeApp}></div>
+                )}
             <div className="connection-status" style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 1000, background: isConnected ? 'green' : 'red', padding: '5px', borderRadius: '5px', color: 'white', fontSize: '12px' }}>
                 {isConnected ? 'Online' : 'Offline'}
             </div>
@@ -499,7 +518,7 @@ function Dashboard() {
                     )}
                 </div>
             </div>
-        </div>
+        </div >
     );
 }
 

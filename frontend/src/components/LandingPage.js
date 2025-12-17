@@ -1,45 +1,47 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import '../App.css';
 
-const LandingPage = () => {
+function LandingPage() {
     const navigate = useNavigate();
+    const [hasInteracted, setHasInteracted] = useState(false);
 
     useEffect(() => {
-        const speakWelcome = () => {
-            const text = "Tap anywhere on the screen to begin.";
-            const utterance = new SpeechSynthesisUtterance(text);
+        // Attempt auto-play greeting
+        const speakGreeting = () => {
+            const utterance = new SpeechSynthesisUtterance("Welcome to Vision Assistant.");
+            utterance.rate = 1.0;
+            utterance.onend = () => {
+                navigate('/dashboard');
+            };
             window.speechSynthesis.speak(utterance);
         };
 
-        // Small delay to ensure browser is ready
-        const timer = setTimeout(speakWelcome, 500);
-        return () => clearTimeout(timer);
-    }, []);
+        // Check if we can speak immediately (some browsers allow if triggered by recent interaction or simple reload)
+        // But reliably, we might need a tap.
+        // Let's try to speak.
+        speakGreeting();
 
-    const handleEnter = () => {
-        window.speechSynthesis.cancel(); // Stop speaking when leaving
-        navigate('/dashboard');
+        // If speech fails or is blocked, the user sees the button.
+    }, [navigate]);
+
+    const handleStart = () => {
+        setHasInteracted(true);
+        const utterance = new SpeechSynthesisUtterance("Welcome to Vision Assistant.");
+        utterance.onend = () => {
+            navigate('/dashboard');
+        };
+        window.speechSynthesis.speak(utterance);
     };
 
     return (
-        <div className="landing-page" onClick={handleEnter}>
-            <div className="landing-background-icons"></div>
-            <div className="landing-content">
-                <div className="pulse-container">
-                    <div className="pulse-ring"></div>
-                    <div className="pulse-ring"></div>
-                    <div className="pulse-ring"></div>
-                    <div className="nav-icon-ball">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
-                            <polygon points="3 11 22 2 13 21 11 13 3 11"></polygon>
-                        </svg>
-                    </div>
-                </div>
-                <h1 className="landing-title">VISION ASSISTANT</h1>
-            </div>
+        <div style={{
+            display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center',
+            height: '100vh', background: '#000', color: '#fff', textAlign: 'center'
+        }} onClick={handleStart}>
+            <h1>Vision Assistant</h1>
+            <p>Tap anywhere to start</p>
         </div>
     );
-};
+}
 
 export default LandingPage;
