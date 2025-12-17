@@ -73,6 +73,27 @@ class Navigator:
         
         return nearest_node, min_dist
 
+    def get_nearest_landmark(self, coords):
+        """Finds the nearest landmark to the given GPS coordinates (lat, lon)."""
+        if not self.landmarks:
+            return None, float('inf')
+            
+        min_dist = float('inf')
+        nearest_name = None
+        
+        # coords is (lat, lon), landmark coords are (lon, lat) usually in GeoJSON
+        # But self.landmarks values are stored as (lon, lat) from the file load
+        
+        for name, lm_coords in self.landmarks.items():
+            # geodesic expects (lat, lon)
+            # lm_coords is (lon, lat)
+            dist = geodesic(coords, lm_coords[::-1]).meters
+            if dist < min_dist:
+                min_dist = dist
+                nearest_name = name
+                
+        return nearest_name, min_dist
+
     def find_shortest_path(self, start_name, end_name):
         start_name = start_name.lower().strip()
         end_name = end_name.lower().strip()

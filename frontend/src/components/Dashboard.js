@@ -106,15 +106,23 @@ function Dashboard() {
                 const parts = text.split(' to ');
                 origin = parts[0].trim();
                 destination = parts[1].trim();
+            } else {
+                origin = 'current';
+                destination = text.trim();
             }
 
-            if (origin && destination) {
-                speak(`Navigating from ${origin} to ${destination}.`, true);
+            if (destination) {
+                if (origin === 'current') {
+                    speak(`Navigating to ${destination}.`, true);
+                } else {
+                    speak(`Navigating from ${origin} to ${destination}.`, true);
+                }
+
                 if (socketRef.current) {
                     socketRef.current.emit('get_navigation', { start: origin, end: destination });
                 }
             } else {
-                speak("I didn't catch the locations. Please try saying 'Entrance to Architecture'.", false);
+                speak("I didn't catch the destination. Please try again.", false);
             }
         };
 
@@ -137,7 +145,7 @@ function Dashboard() {
         let timer;
         // Initial Voice Prompt
         timer = setTimeout(() => {
-            speak("PLEASE TELL ME WHERE WOULD YOU LIKE TO GO", false, () => {
+            speak("Where do you want to go?", false, () => {
                 console.log("Welcome message finished. Starting mic...");
                 handleVoiceCommand();
             });
@@ -194,7 +202,20 @@ function Dashboard() {
                     setRouteCoords(data.route_coords);
                 }
                 setCurrentNavStep(0);
-                speak(`Route found. First step: ${data.instructions[0].text}`);
+                setCurrentNavStep(0);
+
+                if (data.start_message) {
+                    speak(data.start_message, true);
+                    // Also speak the first instruction after a short delay or append it?
+                    // The user flow says: "Announces notification... If you have queries long press..."
+                    // Then "With the directions".
+                    // So we should speak the notification, then the first instruction.
+                    setTimeout(() => {
+                        speak(`First step: ${data.instructions[0].text}`);
+                    }, 6000); // Wait for the long message to finish (approx)
+                } else {
+                    speak(`Route found. First step: ${data.instructions[0].text}`);
+                }
             } else if (data.instructions && data.instructions.length === 0) {
                 console.log("Route found but no instructions (same location?)");
                 speak("You are already at the destination.");
@@ -285,21 +306,32 @@ function Dashboard() {
         };
     }, [captureAndSendForObstacles, navInstructions]);
 
+    // Periodic Analysis (Every 1 minute)
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (videoRef.current && socketRef.current) {
+                console.log("⏰ Periodic surroundings check...");
+                const canvas = document.createElement('canvas');
+                canvas.width = videoRef.current.videoWidth;
+                canvas.height = videoRef.current.videoHeight;
+                canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
+                const imageData = canvas.toDataURL('image/jpeg', 0.8);
+                socketRef.current.emit('analyze_surroundings', { image_data: imageData });
+            }
+        }, 60000); // 60000ms = 1 minute
+
+        return () => clearInterval(interval);
+    }, []);
+
     // Long Press Logic
     const longPressTimer = useRef(null);
 
     const handleTouchStart = () => {
         longPressTimer.current = setTimeout(() => {
-            speak("Scanning surroundings...", true);
-            // Capture frame immediately
-            if (videoRef.current && socketRef.current) {
-                const canvas = document.createElement('canvas');
-                canvas.width = videoRef.current.videoWidth;
-                canvas.height = videoRef.current.videoHeight;
-                canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
-                const imageData = canvas.toDataURL('image/jpeg', 0.8); // Higher quality for analysis
-                socketRef.current.emit('analyze_surroundings', { image_data: imageData });
-            }
+            // Trigger ChatBox
+            window.dispatchEvent(new CustomEvent('activate-chat'));
+            // Provide haptic feedback
+            if (navigator.vibrate) navigator.vibrate(50);
         }, 800); // 800ms long press
     };
 

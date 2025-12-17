@@ -54,16 +54,23 @@ function ChatBox() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
         if (videoRef.current) videoRef.current.srcObject = stream;
-        if (videoRef.current) videoRef.current.play().catch(() => {});
+        if (videoRef.current) videoRef.current.play().catch(() => { });
       } catch (e) {
         console.warn('Camera not available:', e);
       }
     }
     initCamera();
 
+    // Listen for custom event from Dashboard
+    const handleActivateChat = () => {
+      handleLongPressActivated();
+    };
+    window.addEventListener('activate-chat', handleActivateChat);
+
     return () => {
       socket.off('surroundings_analysis');
       socket.off('navigation_response');
+      window.removeEventListener('activate-chat', handleActivateChat);
     };
   }, []);
 
@@ -93,7 +100,7 @@ function ChatBox() {
 
   function stopRecognition() {
     if (recognitionRef.current) {
-      try { recognitionRef.current.stop(); } catch (e) {}
+      try { recognitionRef.current.stop(); } catch (e) { }
       recognitionRef.current = null;
     }
   }
@@ -151,7 +158,7 @@ function ChatBox() {
             const start = names.length > 0 ? names[0] : matched;
 
             const etaRes = await fetch('/api/eta', {
-              method: 'POST', headers: {'Content-Type':'application/json'},
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ start: start, end: matched || dest })
             });
             const etaJson = await etaRes.json();
@@ -185,7 +192,7 @@ function ChatBox() {
       // Use server-side chat (RAG) for general questions
       try {
         const res = await fetch('/api/chat', {
-          method: 'POST', headers: {'Content-Type':'application/json'},
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: text })
         });
         const js = await res.json();
@@ -216,22 +223,22 @@ function ChatBox() {
 
   return (
     <>
-      <video ref={videoRef} style={{display:'none'}} playsInline muted />
+      <video ref={videoRef} style={{ display: 'none' }} playsInline muted />
       {/* Screen-wide double-tap zone for ChatBox activation */}
       <div
         onMouseDown={handlePointerDown}
         onTouchStart={handlePointerDown}
-        aria-label="Double-tap anywhere to activate voice assistant" 
-        style={{position:'fixed', top:0, left:0, right:0, bottom:0, zIndex:1, pointerEvents:'none'}}
+        aria-label="Double-tap anywhere to activate voice assistant"
+        style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1, pointerEvents: 'none' }}
       />
       {/* Accessibility announcement */}
       <div aria-live="polite" aria-label="Double-tap anywhere on the screen to activate the voice assistant">
       </div>
       {/* Chat response box (only show when assistant speaks) */}
       {lastMessage && (
-        <div aria-live="polite" style={{position:'fixed', right:18, bottom:92, width:260, background:'#fff', color:'#000', padding:8, borderRadius:8, boxShadow:'0 4px 10px rgba(0,0,0,0.2)'}}>
+        <div aria-live="polite" style={{ position: 'fixed', right: 18, bottom: 92, width: 260, background: '#fff', color: '#000', padding: 8, borderRadius: 8, boxShadow: '0 4px 10px rgba(0,0,0,0.2)' }}>
           <strong>Assistant</strong>
-          <div style={{marginTop:6}}>{lastMessage}</div>
+          <div style={{ marginTop: 6 }}>{lastMessage}</div>
         </div>
       )}
     </>

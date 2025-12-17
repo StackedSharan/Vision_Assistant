@@ -7,7 +7,7 @@ const LandingPage = () => {
 
     useEffect(() => {
         const speakWelcome = () => {
-            const text = "Welcome to Vision Assistant, Please tap anywhere on the screen.";
+            const text = "Tap anywhere on the screen to begin.";
             const utterance = new SpeechSynthesisUtterance(text);
             window.speechSynthesis.speak(utterance);
         };
