@@ -179,19 +179,18 @@ class Navigator:
                     'start_node': p1
                 })
 
-<<<<<<< HEAD
-                # include numeric distance to help compute ETA
+                # Include numeric distance to help compute ETA
                 instructions.append({ "text": instruction_text, "coords": list(p2), "distance_m": float(dist) })
-=======
+
             # 2. Aggregate instructions
             instructions = []
             current_steps = 0
-            
+
             for i in range(len(segments)):
                 seg = segments[i]
                 # 1 meter approx 1.3 steps
                 current_steps += seg['distance'] * 1.3
-                
+
                 # Determine next action
                 if i == len(segments) - 1:
                     # Last segment
@@ -203,7 +202,7 @@ class Navigator:
                 else:
                     next_seg = segments[i+1]
                     turn = self.get_turn_direction(seg['bearing'], next_seg['bearing'])
-                    
+
                     if turn == "continue straight":
                         # Continue accumulating steps
                         pass
@@ -213,14 +212,13 @@ class Navigator:
                         node_data = self.graph.nodes[seg['end_node']]
                         landmark_name = node_data.get('name')
                         at_text = f" at {landmark_name}" if landmark_name else ""
-                        
+
                         instructions.append({
                             "text": f"After {int(current_steps)} steps, {turn}{at_text}.",
                             "coords": list(seg['end_node']),
                             "distance_m": 0 # Placeholder, maybe aggregate?
                         })
                         current_steps = 0 # Reset for next segment
->>>>>>> bdc5b15c50262411885aea250c797832ada78e59
 
             # Swap (lon, lat) to (lat, lon) for Leaflet
             full_path_lat_lon = [[coord[1], coord[0]] for coord in path_coords]
