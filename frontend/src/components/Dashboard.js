@@ -27,14 +27,34 @@ const DetectionRipple = ({ detection, index }) => {
 };
 
 function Dashboard() {
+<<<<<<< HEAD
     const [statusText, setStatusText] = useState('Initializing...');
     const [detections, setDetections] = useState([]);
+=======
+    const [mode, setMode] = useState('navigation');
+    const [statusText, setStatusText] = useState('Initializing...');
+    const [navInstructions, setNavInstructions] = useState([]);
+    const [routeCoords, setRouteCoords] = useState([]);
+    const [currentNavStep, setCurrentNavStep] = useState(0);
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
     const [isListening, setIsListening] = useState(false);
     const [isConnected, setIsConnected] = useState(false);
+<<<<<<< HEAD
     const [systemState, setSystemState] = useState('idle');
     const [navStatus, setNavStatus] = useState({ active: false, next_step: '', distance_to_step: 0 });
     const [sessionStarted, setSessionStarted] = useState(false);
     const [isGreeting, setIsGreeting] = useState(false);
+=======
+    const [isSimulating, setIsSimulating] = useState(false);
+    const [hasStarted, setHasStarted] = useState(true); // Auto-start in Demo Mode (transitioned from Landing)
+
+    // Voice State Machine: 'IDLE', 'LISTENING_FOR_WAKE', 'LISTENING_FOR_COMMAND', 'CONFIRMING_DESTINATION', 'NAVIGATING'
+    const [voiceState, setVoiceState] = useState('IDLE');
+    const [pendingDestination, setPendingDestination] = useState(null);
+
+    // Map state
+    const [userLocation, setUserLocation] = useState({ lat: 12.9716, lng: 77.5946 });
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
 
     const videoRef = useRef(null);
     const socketRef = useRef(null);
@@ -98,8 +118,246 @@ function Dashboard() {
         window.speechSynthesis.speak(utterance);
     }, []);
 
+<<<<<<< HEAD
     const handleNextStep = useCallback(() => {
         if (socketRef.current) socketRef.current.emit('voice_command', { text: 'next step' });
+=======
+    // --- Voice Logic ---
+    const recognitionRef = useRef(null);
+
+    const startContinuousListening = useCallback(() => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) return;
+
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true; // Keep listening
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+
+        recognition.onresult = (event) => {
+            const lastResultIdx = event.results.length - 1;
+            const transcript = event.results[lastResultIdx][0].transcript.toLowerCase().trim();
+            console.log(`🎤 Heard: "${transcript}" | State: ${voiceState}`);
+
+            handleVoiceInput(transcript);
+        };
+
+        recognition.onend = () => {
+            // Auto-restart if supposed to be listening
+            if (hasStarted) {
+                console.log("🔄 Restarting speech recognition...");
+                try { recognition.start(); } catch (e) { }
+            }
+        };
+
+        recognition.onerror = (e) => {
+            console.warn("Speech error:", e.error);
+        };
+
+        recognitionRef.current = recognition;
+        try { recognition.start(); } catch (e) { }
+    }, [hasStarted, voiceState]); // Dependencies will be handled via refs in a real implementation to avoid restart loops, but for now this is simple.
+
+    // We need a ref for voiceState to access it inside the callback without re-binding
+    const voiceStateRef = useRef(voiceState);
+    useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
+
+    const handleVoiceCommand = () => {
+        if (!isListening) {
+            startContinuousListening();
+        } else {
+            // Maybe stop listening?
+            // recognitionRef.current.stop(); 
+        }
+    };
+
+    const handleVoiceInput = (text) => {
+        const state = voiceStateRef.current;
+        setStatusText(`Heard: "${text}"`);
+
+        // Global Commands
+        if (text.includes('stop') || text.includes('pause')) {
+            speak("Navigation paused.");
+            setVoiceState('IDLE');
+            return;
+        }
+        if (text.includes('help')) {
+            speak("I am your blind navigation assistant. Say 'Vision' to wake me up, then tell me where you want to go.");
+            return;
+        }
+        if (text.includes('emergency') || text.includes('help me')) {
+            speak("Emergency mode activated. Alert sent. Stay calm.");
+            if (socketRef.current) {
+                socketRef.current.emit('emergency_alert', { location: { lat: userLocation.lat, lng: userLocation.lng } });
+            }
+            return;
+        }
+
+        // State Machine
+        switch (state) {
+            case 'IDLE':
+            case 'LISTENING_FOR_WAKE':
+                if (text.includes('hey assist') || text.includes('vision') || text.includes('start navigation')) {
+                    speak("Yes, I'm listening. Where would you like to go?");
+                    setVoiceState('LISTENING_FOR_COMMAND');
+                }
+                break;
+
+            case 'LISTENING_FOR_COMMAND':
+                // Assume text is destination
+                const dest = text.replace(/^(go to|navigate to|take me to)\s+/, '').replace(/[.,?]/g, '');
+                setPendingDestination(dest);
+                speak(`You want to go to ${dest}. Say 'Yes' to confirm or 'Change' to pick a new destination.`);
+                setVoiceState('CONFIRMING_DESTINATION');
+                break;
+
+            case 'CONFIRMING_DESTINATION':
+                if (text.includes('yes') || text.includes('correct') || text.includes('confirm')) {
+                    speak(`Starting navigation to ${pendingDestination}.`);
+                    setVoiceState('NAVIGATING');
+                    if (socketRef.current) {
+                        socketRef.current.emit('get_navigation', { start: 'current', end: pendingDestination });
+                    }
+                } else if (text.includes('change') || text.includes('no')) {
+                    speak("Okay, where would you like to go?");
+                    setVoiceState('LISTENING_FOR_COMMAND');
+                }
+                break;
+
+            case 'NAVIGATING':
+                // Mostly silent, waiting for "Stop" or "Vision" to interrupt
+                if (text.includes('vision')) {
+                    speak("Navigation paused. What would you like to ask?");
+                    // Could switch to a CHAT mode here
+                }
+                break;
+
+            default:
+                break;
+        }
+    };
+
+    // Initialize App
+    const initializeApp = () => {
+        setHasStarted(true);
+        setVoiceState('LISTENING_FOR_WAKE');
+
+        // Auto-ask destination on load (Demo Mode)
+        setTimeout(() => {
+            speak("Where do you want to go?", false, () => {
+                startContinuousListening();
+                setVoiceState('LISTENING_FOR_COMMAND');
+            });
+        }, 1000);
+
+        // 3. Start Camera
+        const startCamera = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
+                if (videoRef.current) videoRef.current.srcObject = stream;
+            } catch (err) {
+                console.error("Camera permission denied", err);
+                speak("Camera access denied. Obstacle detection will not work.");
+            }
+        };
+        startCamera();
+
+        // 4. GPS
+        const watchId = navigator.geolocation.watchPosition(
+            (position) => {
+                const { latitude, longitude } = position.coords;
+                setUserLocation({ lat: latitude, lng: longitude });
+                if (socketRef.current) socketRef.current.emit('location_update', { latitude, longitude });
+            },
+            (error) => {
+                console.error("GPS Error:", error);
+                speak("GPS signal unavailable. Switching to indoor navigation mode.");
+            },
+            { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
+        );
+    };
+
+    useEffect(() => {
+        // Socket Connection
+        socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
+
+        socketRef.current.on('connect', () => {
+            console.log('✅ Socket connected!');
+            setIsConnected(true);
+        });
+
+        socketRef.current.on('disconnect', () => {
+            console.log('❌ Socket disconnected!');
+            setIsConnected(false);
+            speak("Disconnected from server.");
+        });
+
+        socketRef.current.on('navigation_response', (data) => {
+            console.log("Received navigation response:", data);
+            if (data.instructions && data.instructions.length > 0) {
+                setNavInstructions(data.instructions);
+                if (data.route_coords) setRouteCoords(data.route_coords);
+                setCurrentNavStep(0);
+
+                // Speak first instruction
+                speak(`Route found. ${data.instructions[0].text}`);
+            } else {
+                speak("Sorry, a route could not be found.");
+            }
+        });
+
+        socketRef.current.on('obstacle_alert', (data) => {
+            // Handle haptic feedback if vibrate_pattern is provided
+            if (data.vibrate_pattern && navigator.vibrate) {
+                navigator.vibrate(data.vibrate_pattern);
+            }
+
+            if (data.message !== 'Path is clear.') {
+                setObstacleMessage(data.message);
+
+                // Repetition Logic: Only speak the same message up to 2 times
+                if (data.message === lastMsgRef.current) {
+                    if (msgCountRef.current < 2) {
+                        speak(data.message, true);
+                        msgCountRef.current += 1;
+                    }
+                } else {
+                    // New message, reset counter
+                    lastMsgRef.current = data.message;
+                    msgCountRef.current = 1;
+                    speak(data.message, true);
+                }
+            } else {
+                setObstacleMessage('');
+                lastMsgRef.current = '';
+                msgCountRef.current = 0;
+            }
+        });
+
+    }, []); // Empty dependency array to run only once on mount
+
+
+    // Obstacle Detection Loop (Throttled)
+    const lastCaptureTime = useRef(0);
+
+    const captureAndSendForObstacles = useCallback(() => {
+        if (!videoRef.current || !socketRef.current) return;
+
+        const now = Date.now();
+        if (now - lastCaptureTime.current < 2000) { // Run every 2 seconds
+            requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+            return;
+        }
+        lastCaptureTime.current = now;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = videoRef.current.videoWidth;
+        canvas.height = videoRef.current.videoHeight;
+        canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
+        const imageData = canvas.toDataURL('image/jpeg', 0.5);
+        socketRef.current.emit('process_frame_for_obstacles', { image_data: imageData });
+        requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
     }, []);
 
     const handlePrevStep = useCallback(() => {
@@ -138,6 +396,7 @@ function Dashboard() {
 
     // Attach Non-Passive Listeners
     useEffect(() => {
+<<<<<<< HEAD
         const container = containerRef.current;
         if (!container) return;
 
@@ -145,18 +404,46 @@ function Dashboard() {
         container.addEventListener('touchmove', onTouchMove, { passive: false });
         container.addEventListener('touchend', onTouchEnd, { passive: false });
 
+=======
+        // Only start obstacle detection if a route is active (user has set a destination)
+        if (navInstructions.length > 0) {
+            requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+        }
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
         return () => {
             container.removeEventListener('touchstart', onTouchStart);
             container.removeEventListener('touchmove', onTouchMove);
             container.removeEventListener('touchend', onTouchEnd);
         };
+<<<<<<< HEAD
     }, [onTouchStart, onTouchMove, onTouchEnd]);
+=======
+    }, [captureAndSendForObstacles, navInstructions]);
+
+    // Periodic Analysis (Every 1 minute)
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (videoRef.current && socketRef.current) {
+                console.log("⏰ Periodic surroundings check...");
+                const canvas = document.createElement('canvas');
+                canvas.width = videoRef.current.videoWidth;
+                canvas.height = videoRef.current.videoHeight;
+                canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
+                const imageData = canvas.toDataURL('image/jpeg', 0.8);
+                socketRef.current.emit('analyze_surroundings', { image_data: imageData });
+            }
+        }, 60000); // 60000ms = 1 minute
+
+        return () => clearInterval(interval);
+    }, []);
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
 
     // Continuous Voice Automation
     const startVoiceAutomation = useCallback(() => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognition) return;
 
+<<<<<<< HEAD
         if (recognitionRef.current) {
             try { recognitionRef.current.stop(); } catch (e) { }
         }
@@ -251,6 +538,16 @@ function Dashboard() {
                 socketRef.current.emit('process_frame', { image_data: canvas.toDataURL('image/jpeg', 0.5) });
             }
         }, 400);
+=======
+    const handleTouchStart = () => {
+        longPressTimer.current = setTimeout(() => {
+            // Trigger ChatBox
+            window.dispatchEvent(new CustomEvent('activate-chat'));
+            // Provide haptic feedback
+            if (navigator.vibrate) navigator.vibrate(50);
+        }, 800); // 800ms long press
+    };
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
 
         return () => { clearInterval(captureInterval); if (socketRef.current) socketRef.current.disconnect(); };
     }, [sessionStarted, speak, playAlertSound]);
@@ -261,7 +558,18 @@ function Dashboard() {
             className={`dashboard-container ${!sessionStarted ? 'not-started' : ''}`}
             onClick={handleStartSession}
         >
+<<<<<<< HEAD
             <video ref={videoRef} autoPlay playsInline muted className="camera-view" />
+=======
+            {/* Overlay removed for Demo Mode - handled by LandingPage */
+                !hasStarted && (
+                    <div style={{ display: 'none' }} onClick={initializeApp}></div>
+                )}
+            <div className="connection-status" style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 1000, background: isConnected ? 'green' : 'red', padding: '5px', borderRadius: '5px', color: 'white', fontSize: '12px' }}>
+                {isConnected ? 'Online' : 'Offline'}
+            </div>
+            <video ref={videoRef} autoPlay playsInline muted className="hidden-video" />
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
 
             <div className={`state-halo ${systemState} ${isListening ? 'listening' : ''}`}></div>
 
@@ -304,7 +612,7 @@ function Dashboard() {
                 <span className={`status-dot ${isConnected ? 'live' : 'off'}`}></span>
                 {isConnected ? 'LIVE' : 'OFFLINE'}
             </div>
-        </div>
+        </div >
     );
 }
 

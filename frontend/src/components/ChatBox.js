@@ -27,7 +27,11 @@ function ChatBox() {
   const [lastMessage, setLastMessage] = useState('');
   const videoRef = useRef(null);
   const recognitionRef = useRef(null);
+<<<<<<< HEAD
   const longPressTimer = useRef(null);
+=======
+  const lastTapTime = useRef(0);
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
 
   useEffect(() => {
     // setup socket listeners
@@ -49,21 +53,47 @@ function ChatBox() {
       }
     });
 
+<<<<<<< HEAD
+=======
+    socket.on('emergency_response', (data) => {
+      const msg = data.message;
+      setLastMessage(msg);
+      speak(msg);
+    });
+
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
     // prepare camera stream (hidden) so analyze_surroundings can capture frame
     async function initCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
         if (videoRef.current) videoRef.current.srcObject = stream;
+<<<<<<< HEAD
         if (videoRef.current) videoRef.current.play().catch(() => {});
+=======
+        if (videoRef.current) videoRef.current.play().catch(() => { });
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
       } catch (e) {
         console.warn('Camera not available:', e);
       }
     }
     initCamera();
 
+<<<<<<< HEAD
     return () => {
       socket.off('surroundings_analysis');
       socket.off('navigation_response');
+=======
+    // Listen for custom event from Dashboard
+    const handleActivateChat = () => {
+      handleLongPressActivated();
+    };
+    window.addEventListener('activate-chat', handleActivateChat);
+
+    return () => {
+      socket.off('surroundings_analysis');
+      socket.off('navigation_response');
+      window.removeEventListener('activate-chat', handleActivateChat);
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
     };
   }, []);
 
@@ -93,7 +123,11 @@ function ChatBox() {
 
   function stopRecognition() {
     if (recognitionRef.current) {
+<<<<<<< HEAD
       try { recognitionRef.current.stop(); } catch (e) {}
+=======
+      try { recognitionRef.current.stop(); } catch (e) { }
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
       recognitionRef.current = null;
     }
   }
@@ -126,6 +160,15 @@ function ChatBox() {
         return;
       }
 
+<<<<<<< HEAD
+=======
+      if (q.includes('help me')) {
+        speak("Emergency detected. Sending alert.");
+        socket.emit('emergency_alert', {}); // Backend will use last known location
+        return;
+      }
+
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
       if (q.includes('how long') || q.includes('how much time') || q.includes('reach')) {
         // ask for destination
         speak('What is your destination?');
@@ -151,7 +194,11 @@ function ChatBox() {
             const start = names.length > 0 ? names[0] : matched;
 
             const etaRes = await fetch('/api/eta', {
+<<<<<<< HEAD
               method: 'POST', headers: {'Content-Type':'application/json'},
+=======
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
               body: JSON.stringify({ start: start, end: matched || dest })
             });
             const etaJson = await etaRes.json();
@@ -185,7 +232,11 @@ function ChatBox() {
       // Use server-side chat (RAG) for general questions
       try {
         const res = await fetch('/api/chat', {
+<<<<<<< HEAD
           method: 'POST', headers: {'Content-Type':'application/json'},
+=======
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
           body: JSON.stringify({ query: text })
         });
         const js = await res.json();
@@ -205,6 +256,7 @@ function ChatBox() {
   }
 
   function handlePointerDown() {
+<<<<<<< HEAD
     // start long press timer
     longPressTimer.current = setTimeout(() => {
       handleLongPressActivated();
@@ -216,10 +268,20 @@ function ChatBox() {
       clearTimeout(longPressTimer.current);
       longPressTimer.current = null;
     }
+=======
+    // Detect double-tap: two taps within 300ms
+    const now = Date.now();
+    if (now - lastTapTime.current < 300) {
+      // Double-tap detected
+      handleLongPressActivated();
+    }
+    lastTapTime.current = now;
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
   }
 
   return (
     <>
+<<<<<<< HEAD
       <video ref={videoRef} style={{display:'none'}} playsInline muted />
       <div
         onMouseDown={handlePointerDown}
@@ -235,6 +297,26 @@ function ChatBox() {
         <strong>Assistant</strong>
         <div style={{marginTop:6}}>{lastMessage}</div>
       </div>
+=======
+      <video ref={videoRef} style={{ display: 'none' }} playsInline muted />
+      {/* Screen-wide double-tap zone for ChatBox activation */}
+      <div
+        onMouseDown={handlePointerDown}
+        onTouchStart={handlePointerDown}
+        aria-label="Double-tap anywhere to activate voice assistant"
+        style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1, pointerEvents: 'none' }}
+      />
+      {/* Accessibility announcement */}
+      <div aria-live="polite" aria-label="Double-tap anywhere on the screen to activate the voice assistant">
+      </div>
+      {/* Chat response box (only show when assistant speaks) */}
+      {lastMessage && (
+        <div aria-live="polite" style={{ position: 'fixed', right: 18, bottom: 92, width: 260, background: '#fff', color: '#000', padding: 8, borderRadius: 8, boxShadow: '0 4px 10px rgba(0,0,0,0.2)' }}>
+          <strong>Assistant</strong>
+          <div style={{ marginTop: 6 }}>{lastMessage}</div>
+        </div>
+      )}
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
     </>
   );
 }

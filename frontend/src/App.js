@@ -24,7 +24,16 @@ function AppContent() {
 function App() {
   return (
     <Router>
+<<<<<<< HEAD
       <AppContent />
+=======
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/calibrate" element={<Calibration />} />
+      </Routes>
+      <ChatBox />
+>>>>>>> bdc5b15c50262411885aea250c797832ada78e59
     </Router>
   );
 }
