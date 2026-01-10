@@ -1,6 +1,7 @@
 import geojson
 import networkx as nx
 from geopy.distance import geodesic
+import math
 
 class Navigator:
     def __init__(self, map_path):
@@ -73,6 +74,57 @@ class Navigator:
         
         return nearest_node, min_dist
 
+    def get_nearest_landmark(self, coords):
+        """Finds the nearest landmark to the given GPS coordinates (lat, lon)."""
+        if not self.landmarks:
+            return None, float('inf')
+            
+        min_dist = float('inf')
+        nearest_name = None
+        
+        # coords is (lat, lon), landmark coords are (lon, lat) usually in GeoJSON
+        # But self.landmarks values are stored as (lon, lat) from the file load
+        
+        for name, lm_coords in self.landmarks.items():
+            # geodesic expects (lat, lon)
+            # lm_coords is (lon, lat)
+            dist = geodesic(coords, lm_coords[::-1]).meters
+            if dist < min_dist:
+                min_dist = dist
+                nearest_name = name
+                
+        return nearest_name, min_dist
+
+    def calculate_bearing(self, pointA, pointB):
+        """Calculates the bearing between two points (lat, lon)."""
+        lat1 = math.radians(pointA[0])
+        lat2 = math.radians(pointB[0])
+        diffLong = math.radians(pointB[1] - pointA[1])
+
+        x = math.sin(diffLong) * math.cos(lat2)
+        y = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1) * math.cos(lat2) * math.cos(diffLong))
+
+        initial_bearing = math.atan2(x, y)
+        initial_bearing = math.degrees(initial_bearing)
+        compass_bearing = (initial_bearing + 360) % 360
+        return compass_bearing
+
+    def get_turn_direction(self, bearing1, bearing2):
+        """Determines turn direction based on change in bearing."""
+        diff = bearing2 - bearing1
+        # Normalize to -180 to +180
+        if diff > 180: diff -= 360
+        if diff < -180: diff += 360
+        
+        if -45 <= diff <= 45:
+            return "continue straight"
+        elif 45 < diff < 135:
+            return "turn right"
+        elif -135 < diff < -45:
+            return "turn left"
+        else:
+            return "make a sharp turn"
+
     def find_shortest_path(self, start_name, end_name):
         start_name = start_name.lower().strip()
         end_name = end_name.lower().strip()
@@ -95,7 +147,6 @@ class Navigator:
             nearest, dist = self.get_nearest_connected_node(start_node)
             if nearest:
                 print(f"   ✅ Snapped start to {nearest} ({dist:.1f}m)")
-                # Add temporary edge to connect landmark to graph
                 self.graph.add_edge(start_node, nearest, weight=dist)
             else:
                 print("   ❌ Could not snap start node.")
@@ -106,7 +157,6 @@ class Navigator:
             nearest, dist = self.get_nearest_connected_node(end_node)
             if nearest:
                 print(f"   ✅ Snapped end to {nearest} ({dist:.1f}m)")
-                # Add temporary edge to connect landmark to graph
                 self.graph.add_edge(end_node, nearest, weight=dist)
             else:
                 print("   ❌ Could not snap end node.")
@@ -115,23 +165,62 @@ class Navigator:
         try:
             path_coords = nx.dijkstra_path(self.graph, source=start_node, target=end_node, weight='weight')
             
-            instructions = []
+            # 1. Pre-calculate segments with bearings
+            segments = []
             for i in range(len(path_coords) - 1):
                 p1, p2 = path_coords[i], path_coords[i+1]
                 dist = self.graph[p1][p2]['weight']
-                
-                instruction_text = f"Walk {dist:.0f} meters forward."
-                node_data = self.graph.nodes[p2]
-                if node_data.get('type') == 'landmark':
-                    instruction_text = f"Walk {dist:.0f} meters to reach {node_data['name']}."
+                # p1, p2 are (lon, lat), calculate_bearing needs (lat, lon)
+                bearing = self.calculate_bearing(p1[::-1], p2[::-1])
+                segments.append({
+                    'distance': dist,
+                    'bearing': bearing,
+                    'end_node': p2,
+                    'start_node': p1
+                })
 
-                # include numeric distance to help compute ETA
-                instructions.append({ "text": instruction_text, "coords": list(p2), "distance_m": float(dist) })
+            # 2. Aggregate instructions
+            instructions = []
+            current_steps = 0
+            
+            for i in range(len(segments)):
+                seg = segments[i]
+                # 1 meter approx 1.3 steps
+                current_steps += seg['distance'] * 1.3
+                
+                # Determine next action
+                if i == len(segments) - 1:
+                    # Last segment
+                    instructions.append({
+                        "text": f"After {int(current_steps)} steps, you will reach your destination.",
+                        "coords": list(seg['end_node']),
+                        "distance_m": seg['distance'] # Keep last segment distance or total? Just segment for now.
+                    })
+                else:
+                    next_seg = segments[i+1]
+                    turn = self.get_turn_direction(seg['bearing'], next_seg['bearing'])
+                    
+                    if turn == "continue straight":
+                        # Continue accumulating steps
+                        pass
+                    else:
+                        # Turn detected
+                        # Check if there is a landmark at this turn
+                        node_data = self.graph.nodes[seg['end_node']]
+                        landmark_name = node_data.get('name')
+                        at_text = f" at {landmark_name}" if landmark_name else ""
+                        
+                        instructions.append({
+                            "text": f"After {int(current_steps)} steps, {turn}{at_text}.",
+                            "coords": list(seg['end_node']),
+                            "distance_m": 0 # Placeholder, maybe aggregate?
+                        })
+                        current_steps = 0 # Reset for next segment
 
             # Swap (lon, lat) to (lat, lon) for Leaflet
             full_path_lat_lon = [[coord[1], coord[0]] for coord in path_coords]
 
-            print(f"✅ Path found with {len(instructions)} steps.")
+            print(f"✅ Path found with {len(instructions)} aggregated steps.")
             return {
                 "instructions": instructions,
                 "full_path": full_path_lat_lon

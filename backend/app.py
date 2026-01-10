@@ -1,183 +1,207 @@
-from flask import Flask
+from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 import base64
 import cv2
 import numpy as np
 import os
-from modules.navigator import Navigator
-from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
-from ultralytics import YOLO
+import time
+import json
+import threading
 
-# --- Object Detector Class (YOLOv8) ---
-class ObjectDetector:
-    def __init__(self):
-        # Load YOLOv8n (Nano) model - small and fast
-        # It will automatically download 'yolov8n.pt' if not present
-        self.model = YOLO('yolov8n.pt')
-        print("✅ YOLOv8 Object Detector Initialized.")
+# Import our new modules
+from assistant.state_machine import VisionAssistantFSM, State
+from assistant.intent_parser import IntentParser
+from assistant.context_manager import ContextManager
+from vision.detector import ObjectDetector
+from vision.distance import classify_urgency
+from navigation.navigator import Navigator
+from audio.tts import TTSEngine
+from audio.sound_classifier import SoundClassifier
 
-    def detect(self, image_frame):
-        # Run inference
-        results = self.model(image_frame, verbose=False)
+class VisionAssistantApp:
+    def __init__(self, socketio):
+        self.socketio = socketio
+        self.tts = TTSEngine(socketio)
+        self.fsm = VisionAssistantFSM(self.tts)
+        self.intent_parser = IntentParser()
+        self.context = ContextManager()
+        self.detector = ObjectDetector(mode='yolo') # Prefers YOLO
+        self.navigator = Navigator(self.context)
+        self.sound_classifier = SoundClassifier(callback=self.handle_sound_hazard)
         
-        detections = []
-        # Process results
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                # Class ID
-                cls = int(box.cls[0])
-                # Confidence
-                conf = float(box.conf[0])
-                # Class Name
-                name = self.model.names[cls]
-                
-                # Filter for relevant objects and confidence > 0.4
-                if conf > 0.4 and name in ['person', 'car', 'bicycle', 'motorcycle', 'bus', 'truck', 'cat', 'dog', 'bottle', 'chair']:
-                    # Bounding Box
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    
-                    # Estimate distance (Rough approximation based on width)
-                    # This is not accurate without calibration but gives a relative idea
-                    width_pixels = x2 - x1
-                    # Heuristic: Larger width = closer. 
-                    # Assuming a person is ~0.5m wide. Focal length ~600.
-                    # Distance = (Real Width * Focal Length) / Pixel Width
-                    real_width = 0.5 if name == 'person' else 1.5 # Default widths
-                    distance = (real_width * 600) / width_pixels
-                    
-                    center_x = (x1 + x2) / 2 / image_frame.shape[1] # Normalized 0-1
-
-                    detections.append({
-                        'name': name,
-                        'distance': float(distance),
-                        'position_x': float(center_x),
-                        'confidence': conf
-                    })
+        # Start sound classifier in a background check loop or separate thread if needed
+        self.sound_classifier.start()
         
-        print(f"🔍 YOLO Detections: {len(detections)} found.")
-        return detections
+        self.last_critical_alert_time = 0
+        self.critical_alert_cooldown = 5.0
+        self.last_periodic_info_time = time.time()
+        self.periodic_info_interval = 45.0 # Random 30-60 in logic
+        self.last_spoken_nav_step = -1
 
-# --- SETUP AND INITIALIZATION ---
+    def handle_sound_hazard(self, hazard_type):
+        self.fsm.handle_event("HAZARD_DETECTED", {"type": "sound", "hazard": hazard_type})
+        self.tts.speak(f"Warning. {hazard_type} detected.")
+        # Hazard clearing logic would normally be more complex
+        threading.Timer(5.0, lambda: self.fsm.handle_event("HAZARD_CLEARED")).start()
+
+    def process_voice_command(self, text):
+        parsed = self.intent_parser.parse(text)
+        intent = parsed['intent']
+        data = parsed['data']
+        
+        print(f"Parsed Intent: {intent}, Data: {data}")
+
+        # Navigation-specific hint
+        hint = ". Swipe up to hear the next instruction and swipe down for the previous instruction."
+        
+        if intent == "start_assistance":
+            self.fsm.handle_event("VOICE_COMMAND", {"intent": "start_assistance"})
+            self.tts.speak("Vision assistant active. Scanning environment.")
+        
+        elif intent == "guide_me":
+            dest = data.get("destination")
+            if dest:
+                self.tts.speak(f"Calculating route to {dest}")
+                # Assuming start_navigation now returns the first instruction
+                instr = self.navigator.start_navigation('entrance', dest) 
+                self.fsm.handle_event("VOICE_COMMAND", {"intent": intent})
+                self.tts.speak(f"Guiding you to {dest}. {instr}" + hint)
+            else:
+                self.tts.speak("Where would you like to go?")
+        
+        elif intent == "next_step":
+            msg = self.navigator.get_next_step()
+            self.tts.speak(msg + hint)
+        
+        elif intent == "repeat":
+            msg = self.navigator.get_prev_step()
+            self.tts.speak(msg + hint)
+            
+        elif intent == "stop_navigation":
+            msg = self.navigator.stop_navigation()
+            self.fsm.handle_event("VOICE_COMMAND", {"intent": "stop_navigation"})
+            self.tts.speak(msg)
+            
+        elif intent == "what_is_front":
+            summary = self.context.get_summary_for_rag() # Basic summary for now
+            self.tts.speak(summary)
+            
+        elif intent == "where_am_i":
+            if self.context.current_location:
+                # In a real app, use reverse geocoding or landmark name
+                self.tts.speak(f"You are at your current GPS location.")
+            else:
+                self.tts.speak("I'm sorry, I don't know your exact location yet.")
+        
+        elif intent == "pause":
+            self.fsm.handle_event("VOICE_COMMAND", {"intent": "pause"})
+            self.tts.speak("Assistance paused.")
+        
+        elif intent == "resume":
+            self.fsm.handle_event("VOICE_COMMAND", {"intent": "resume"})
+            self.tts.speak("Assistance resumed.")
+
+# --- Flask & SocketIO Setup ---
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
-object_detector = ObjectDetector()
-navigator = Navigator(map_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'map.geojson'))
-print("✅ Navigator Initialized.")
+va_app = VisionAssistantApp(socketio)
 
-# --- NEW GPS FEATURE SETUP ---
-geolocator = Nominatim(user_agent="vision_assistant")
-CAMPUS_CENTER = (12.9716, 77.5946) 
-CAMPUS_RADIUS_METERS = 500
-user_is_in_geofence = None 
-
-def get_position_label(x_coordinate):
-    if x_coordinate < 0.35: return "to your left"
-    elif x_coordinate > 0.65: return "to your right"
-    else: return "in front of you"
-
-def generate_summary(objects):
-    if not objects: return "The path ahead looks clear."
-    objects.sort(key=lambda x: x['distance'])
-    closest_obj = objects[0]
-    position_text = get_position_label(closest_obj['position_x'])
-    summary = f"I see a {closest_obj['name']} {position_text}, about {closest_obj['distance']:.1f} meters away."
-    if len(objects) > 1:
-        other_object_names = [obj['name'] for obj in objects[1:]]
-        other_objects_str = ", a ".join(other_object_names)
-        summary += f" There is also a {other_objects_str} nearby."
-    return summary
-
-def decode_image_from_data_url(data_url):
+def decode_image(data_url):
     encoded_data = data_url.split(',')[1]
     nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    return img
+    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-# --- SOCKETIO EVENTS ---
 @socketio.on('connect')
 def handle_connect():
     print('✅ Client connected')
 
-@socketio.on('process_frame_for_obstacles')
+@socketio.on('process_frame')
 def handle_process_frame(data):
-    """Real-time obstacle detection loop."""
+    if va_app.fsm.state == State.IDLE or va_app.fsm.state == State.PAUSE:
+        return
+
     try:
-        image = decode_image_from_data_url(data['image_data'])
-        detections = object_detector.detect(image)
+        image = decode_image(data['image_data'])
+        detections = va_app.detector.detect(image)
+        va_app.context.update_detections(detections)
         
-        # Filter for critical obstacles only to reduce noise
-        critical_objects = [d for d in detections if d['distance'] < 3.0] # Only objects within 3 meters
+        now = time.time()
         
-        if critical_objects:
-            summary = generate_summary(critical_objects)
-            emit('obstacle_alert', {'message': summary})
+        # 1. Critical Obstacle Logic (Every 5 seconds)
+        critical = [d for d in detections if d.get('urgency') == 'CRITICAL']
+        if critical:
+            if now - va_app.last_critical_alert_time > va_app.critical_alert_cooldown:
+                obj = critical[0]
+                va_app.fsm.handle_event("HAZARD_DETECTED", {"type": "vision", "obj": obj})
+                
+                # Descriptive safety alerts
+                name = obj['name'].lower()
+                if any(v in name for v in ["car", "bus", "truck", "vehicle"]):
+                    alert_msg = f"Please stop for a while, vehicle approaching."
+                elif "person" in name:
+                    alert_msg = f"Please stop, there is a person in front of you."
+                else:
+                    alert_msg = f"Caution. there is a {obj['name']} very close. Please stop."
+
+                socketio.emit('alert_sound', {'type': 'critical'})
+                va_app.tts.speak(alert_msg)
+                va_app.last_critical_alert_time = now
         else:
-            emit('obstacle_alert', {'message': 'Path is clear.'})
+            # AUTO-RECOVERY: If we were in ALERT_MODE but no hazards are left, clear it
+            if va_app.fsm.state == State.ALERT_MODE and va_app.fsm.hazard_detected:
+                print("✨ Hazard cleared automatically (Vision)")
+                va_app.fsm.handle_event("HAZARD_CLEARED")
+                # Repeat current instruction if navigating
+                if va_app.fsm.navigation_active:
+                    instr = va_app.navigator.get_prev_step() # Repeat current step
+                    hint = ". Swipe up to hear the next instruction and swipe down for the previous instruction."
+                    va_app.tts.speak(instr + hint)
+        
+        # 2. Periodic Info Scan (Every 30-60 seconds)
+        if not critical and detections and va_app.fsm.state != State.ALERT_MODE:
+            if now - va_app.last_periodic_info_time > va_app.periodic_info_interval:
+                # Pick the closest non-critical object
+                obj = min(detections, key=lambda x: x.get('distance', 99))
+                pos_label = "front"
+                if obj.get('position_x', 0.5) < 0.35: pos_label = "left"
+                elif obj.get('position_x', 0.5) > 0.65: pos_label = "right"
+                
+                info_text = f"There is a {obj['name']} {obj.get('distance', '?'):.1f} meters away to your {pos_label}."
+                va_app.tts.speak(info_text)
+                va_app.last_periodic_info_time = now
+                import random
+                va_app.periodic_info_interval = random.uniform(30.0, 60.0)
             
+        emit('detections_update', {'detections': detections})
+        
     except Exception as e:
         print(f"Error processing frame: {e}")
 
-@socketio.on('analyze_surroundings')
-def handle_analyze_surroundings(data):
-    """On-demand detailed analysis (Long Press)."""
-    print("📸 Analyzing surroundings (Long Press)...")
-    try:
-        image = decode_image_from_data_url(data['image_data'])
+@socketio.on('voice_command')
+def handle_voice_command(data):
+    text = data.get('text', '')
+    if text:
+        # Override navigator speak to include swipe hint
+        original_speak = va_app.tts.speak
+        def nav_speak(msg, is_nav=False):
+            if is_nav:
+                msg += ". Swipe up to hear the next instruction and swipe down for the previous instruction."
+            original_speak(msg)
         
-        # DEBUG: Save image to verify camera input
-        cv2.imwrite('debug_frame.jpg', image)
-        print("💾 Saved debug_frame.jpg")
-
-        detections = object_detector.detect(image)
-        
-        if detections:
-            # More detailed summary for explicit request
-            summary = generate_summary(detections)
-            emit('surroundings_analysis', {'message': summary})
-        else:
-            emit('surroundings_analysis', {'message': "I don't see any obstacles nearby."})
-            
-    except Exception as e:
-        print(f"Error analyzing surroundings: {e}")
-        emit('surroundings_analysis', {'message': "Error analyzing image."})
-
-@socketio.on('get_navigation')
-def handle_get_navigation(data):
-    print(f"\n📍 RECEIVED NAVIGATION REQUEST: {data}")
-    start = data.get('start')
-    end = data.get('end')
-    
-    print(f"🔍 Calling navigator.find_shortest_path('{start}', '{end}')...")
-    
-    try:
-        result = navigator.find_shortest_path(start, end)
-        
-        if result:
-            emit('navigation_response', {
-                'instructions': result['instructions'],
-                'route_coords': result['full_path']
-            })
-        else:
-            emit('navigation_response', {'error': f"Could not find a route from {start} to {end}."})
-    except Exception as e:
-        print(f"❌ Error in handle_get_navigation: {e}")
-        emit('navigation_response', {'error': str(e)})
+        # Temporarily swap for navigation intents (or just bake it into process_voice_command)
+        va_app.process_voice_command(text)
 
 @socketio.on('location_update')
 def handle_location_update(data):
-    global user_is_in_geofence
-    user_coords = (data['latitude'], data['longitude'])
-    distance_to_center = geodesic(user_coords, CAMPUS_CENTER).meters
-    is_currently_inside = distance_to_center < CAMPUS_RADIUS_METERS
-    
-    if is_currently_inside != user_is_in_geofence:
-        user_is_in_geofence = is_currently_inside
-        if is_currently_inside:
-            emit('context_update', {'message': 'Welcome to campus. Navigation Mode is now available.'})
-        else:
-            emit('context_update', {'message': 'You have left the campus area.'})
+    lat, lon = data.get('latitude'), data.get('longitude')
+    if lat and lon:
+        instr = va_app.navigator.update_position(lat, lon)
+        if instr and va_app.fsm.state == State.NAVIGATION_MODE:
+            hint = ". Swipe up for the next instruction and swipe down for the previous instruction."
+            va_app.tts.speak(instr + hint)
+        emit('navigation_status', va_app.context.navigation_status)
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000)
+    # Initial greeting
+    print("🚀 Vision Assistant Server Starting...")
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)

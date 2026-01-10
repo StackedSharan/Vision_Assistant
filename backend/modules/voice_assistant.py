@@ -7,6 +7,14 @@ from gtts import gTTS
 import os
 import subprocess
 import sys
+import time
+
+# Prefer an offline TTS engine when available for low-latency, offline speech.
+try:
+    import pyttsx3
+    HAS_PYTTSX3 = True
+except Exception:
+    HAS_PYTTSX3 = False
 
 # --- Configuration ---
 MODEL_PATH = "backend/models/vosk-model-en"
@@ -28,48 +36,44 @@ class VoiceAssistant:
         This will solve the issue of sound not playing before the request ends.
         """
         print(f"Assistant Speaking: {text}")
+
+        # 1) Prefer offline TTS (pyttsx3) if available — it plays audio synchronously.
+        if HAS_PYTTSX3:
+            try:
+                engine = pyttsx3.init()
+                # Optional: tune voice rate/volume here if desired
+                engine.say(text)
+                engine.runAndWait()
+                return
+            except Exception as e:
+                print(f"pyttsx3 failed, falling back to gTTS: {e}")
+
+        # 2) Fallback to gTTS (network-dependent) with file playback
         filename = "temp_speech.mp3"
         try:
-            # 1. Create the audio file
             tts = gTTS(text=text, lang=lang)
             tts.save(filename)
 
-            # 2. Determine the correct command to play audio based on the OS
+            # Play the file using platform-appropriate command
             if sys.platform == "win32":
-                # On Windows, 'start' can run the default media player
-                # The /min flag starts it minimized so no window pops up
                 command = ["start", "/min", filename]
-                # We use shell=True for this specific Windows command
                 subprocess.run(command, shell=True, check=True)
-            elif sys.platform == "darwin": # macOS
-                command = ["afplay", filename]
-                subprocess.run(command, check=True)
-            else: # Linux
-                command = ["mpg123", filename]
-                subprocess.run(command, check=True)
+            elif sys.platform == "darwin":
+                subprocess.run(["afplay", filename], check=True)
+            else:
+                subprocess.run(["mpg123", filename], check=True)
 
-            # NOTE: For this method to be truly blocking on Windows,
-            # we need to add a small manual wait. We'll use a simple time.sleep
-            # based on a rough estimate of speech duration.
-            # A more advanced solution would be needed for perfect sync,
-            # but this will solve the "no sound" problem.
+            # Estimate duration and wait a little on Windows to ensure playback finishes
             if sys.platform == "win32":
-                import time
-                # Estimate duration: 1 second per 5 words
                 duration_estimate = max(1.5, len(text.split()) / 5.0)
                 time.sleep(duration_estimate)
 
         except Exception as e:
-            # If the command fails (e.g., mpg123 not installed on Linux)
-            print(f"Error playing sound: {e}")
-            print("Please ensure you have a command-line MP3 player installed if you are on Linux (e.g., 'sudo apt-get install mpg123')")
+            print(f"Error playing sound via gTTS fallback: {e}")
         finally:
-            # 3. Clean up the file
             if os.path.exists(filename):
                 try:
-                    # Add a tiny delay to ensure the file is released by the player
-                    if sys.platform == "win32":
-                       time.sleep(0.5)
+                    time.sleep(0.2)
                     os.remove(filename)
                 except Exception as e:
                     print(f"Error removing temp file: {e}")

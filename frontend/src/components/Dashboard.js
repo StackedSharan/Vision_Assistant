@@ -1,463 +1,308 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import io from 'socket.io-client';
 import '../App.css';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
-import 'leaflet/dist/leaflet.css';
-import L from 'leaflet';
 
-// Fix for default marker icon
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-    iconRetinaUrl: require('leaflet/dist/images/marker-icon-2x.png'),
-    iconUrl: require('leaflet/dist/images/marker-icon.png'),
-    shadowUrl: require('leaflet/dist/images/marker-shadow.png'),
-});
-
-// Person SVG Icon
-const personIcon = new L.Icon({
-    iconUrl: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzQyODVGNCIgd2lkdGg9IjQ4cHgiIGhlaWdodD0iNDhweCI+PHBhdGggZD0iTTEyIDEyYzIuMjEgMCA0LTEuNzkgNC00cy0xLjc5LTQtNC00LTQgMS43OS00IDQgMS43OSA0IDQgNHptMCAyYy0yLjY3IDAtOCAxLjM0LTggNHYyaDE2di0yYzAtMi42Ni01LjMzLTQtOC00eiIvPjwvc3ZnPg==',
-    iconSize: [40, 40],
-    iconAnchor: [20, 40],
-    popupAnchor: [0, -40]
-});
-
-// CRITICAL: Replace this with your BACKEND ngrok URL
-// For local testing, use http://localhost:5000
 const SOCKET_URL = 'http://localhost:5000';
 
-// Helper to update map view
-function MapUpdater({ center, routeCoords }) {
-    const map = useMap();
-    useEffect(() => {
-        if (routeCoords && routeCoords.length > 0) {
-            // Create a bounds object from the route coordinates
-            const bounds = L.latLngBounds(routeCoords);
-            map.fitBounds(bounds, { padding: [50, 50] });
-        } else if (center) {
-            map.setView(center, map.getZoom());
-        }
-    }, [center, routeCoords, map]);
-    return null;
-}
+const DetectionRipple = ({ detection, index }) => {
+    const left = (detection.position_x || 0.5) * 100;
+    const distance = detection.distance || 5;
+    const scale = Math.max(0.4, 2.5 - distance / 2);
+    const opacity = Math.max(0.1, 0.8 - distance / 6);
+
+    return (
+        <div
+            className={`detection-ripple ${detection.urgency === 'CRITICAL' ? 'critical' : ''}`}
+            style={{
+                left: `${left}%`,
+                top: '50%',
+                width: `${100 * scale}px`,
+                height: `${100 * scale}px`,
+                borderColor: detection.urgency === 'CRITICAL' ? 'var(--critical-red)' : 'var(--neon-blue)',
+                opacity: opacity,
+                boxShadow: detection.urgency === 'CRITICAL' ? '0 0 30px var(--critical-red)' : 'none'
+            }}
+        />
+    );
+};
 
 function Dashboard() {
-    const [mode, setMode] = useState('navigation');
-    const [statusText, setStatusText] = useState('Tap mic to speak');
-    const [navInstructions, setNavInstructions] = useState([]);
-    const [routeCoords, setRouteCoords] = useState([]);
-    const [currentNavStep, setCurrentNavStep] = useState(0);
+    const [statusText, setStatusText] = useState('Initializing...');
+    const [detections, setDetections] = useState([]);
     const [isListening, setIsListening] = useState(false);
-    const [obstacleMessage, setObstacleMessage] = useState('');
     const [isConnected, setIsConnected] = useState(false);
-    const [isSimulating, setIsSimulating] = useState(false);
-
-    // Map state
-    const [userLocation, setUserLocation] = useState({ lat: 12.9716, lng: 77.5946 });
+    const [systemState, setSystemState] = useState('idle');
+    const [navStatus, setNavStatus] = useState({ active: false, next_step: '', distance_to_step: 0 });
+    const [sessionStarted, setSessionStarted] = useState(false);
+    const [isGreeting, setIsGreeting] = useState(false);
 
     const videoRef = useRef(null);
     const socketRef = useRef(null);
-    const requestRef = useRef(null);
-    const hasWelcomed = useRef(false);
-    const lastMsgRef = useRef('');
-    const msgCountRef = useRef(0);
+    const recognitionRef = useRef(null);
+    const containerRef = useRef(null);
+    const touchY = useRef(0);
 
-    // Enhanced speak function
-    const speak = useCallback((text, interrupt = false, onEnd = null) => {
-        if (interrupt) window.speechSynthesis.cancel();
+    const playBeep = useCallback(() => {
+        try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const masterGain = audioCtx.createGain();
+            masterGain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            masterGain.connect(audioCtx.destination);
+
+            // Dual oscillator "Ping" sound
+            const osc1 = audioCtx.createOscillator();
+            const osc2 = audioCtx.createOscillator();
+
+            osc1.type = 'sine';
+            osc1.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+
+            osc2.type = 'sine';
+            osc2.frequency.setValueAtTime(1760, audioCtx.currentTime); // A6 (harmonics)
+
+            const oscGain = audioCtx.createGain();
+            oscGain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            oscGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+
+            osc1.connect(oscGain);
+            osc2.connect(oscGain);
+            oscGain.connect(masterGain);
+
+            osc1.start();
+            osc2.start();
+            osc1.stop(audioCtx.currentTime + 0.3);
+            osc2.stop(audioCtx.currentTime + 0.3);
+        } catch (e) { }
+    }, []);
+
+    const playAlertSound = useCallback(() => {
+        try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.type = 'square';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 0.1);
+        } catch (e) { }
+    }, []);
+
+    const speak = useCallback((text, onEnd) => {
+        if (!window.speechSynthesis) return;
+        window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.0;
         if (onEnd) utterance.onend = onEnd;
         window.speechSynthesis.speak(utterance);
     }, []);
 
-    const handleVoiceCommand = useCallback(() => {
-        if (isListening) return;
-
-        // Cancel any ongoing speech before listening
-        window.speechSynthesis.cancel();
-
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            alert('Speech recognition not supported.');
-            return;
-        }
-        const recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.interimResults = false; // Only final results
-        recognition.lang = 'en-US';
-
-        setIsListening(true);
-        setStatusText('Listening...');
-
-        recognition.onresult = (event) => {
-            const command = event.results[0][0].transcript.toLowerCase();
-            console.log("Command:", command);
-            setStatusText(`Heard: "${command}"`);
-
-            // Flexible NLP Parsing
-            let text = command.toLowerCase();
-            // Remove common filler words
-            text = text.replace(/^(go|navigate|walk|run|drive|please)\s+/, '');
-            text = text.replace(/^\s*from\s+/, ''); // Remove leading 'from' if present
-
-            let origin = null;
-            let destination = null;
-
-            if (text.includes(' to ')) {
-                const parts = text.split(' to ');
-                origin = parts[0].trim();
-                destination = parts[1].trim();
-            }
-
-            if (origin && destination) {
-                speak(`Navigating from ${origin} to ${destination}.`, true);
-                if (socketRef.current) {
-                    socketRef.current.emit('get_navigation', { start: origin, end: destination });
-                }
-            } else {
-                speak("I didn't catch the locations. Please try saying 'Entrance to Architecture'.", false);
-            }
-        };
-
-        recognition.onend = () => setIsListening(false);
-
-        recognition.onerror = (event) => {
-            console.error("Speech recognition error", event.error);
-            setIsListening(false);
-            setStatusText('Tap mic to speak');
-        };
-
-        try {
-            recognition.start();
-        } catch (e) {
-            console.error("Recognition start failed", e);
-        }
-    }, [isListening, speak]);
-
-    useEffect(() => {
-        let timer;
-        // Initial Voice Prompt
-        timer = setTimeout(() => {
-            speak("PLEASE TELL ME WHERE WOULD YOU LIKE TO GO", false, () => {
-                console.log("Welcome message finished. Starting mic...");
-                handleVoiceCommand();
-            });
-        }, 1000);
-
-        // Start Camera
-        const startCamera = async () => {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
-                if (videoRef.current) videoRef.current.srcObject = stream;
-            } catch (err) {
-                console.error("Camera permission denied", err);
-            }
-        };
-        startCamera();
-
-        // GPS Tracking
-        const watchId = navigator.geolocation.watchPosition(
-            (position) => {
-                const { latitude, longitude } = position.coords;
-                setUserLocation({ lat: latitude, lng: longitude });
-
-                // Send location update to backend for geofencing
-                if (socketRef.current) {
-                    socketRef.current.emit('location_update', { latitude, longitude });
-                }
-            },
-            (error) => console.error("GPS Error:", error),
-            { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
-        );
-
-        // Socket Connection
-        socketRef.current = io(SOCKET_URL, { transports: ['websocket'] });
-
-        socketRef.current.on('connect', () => {
-            console.log('✅ Socket connected!');
-            setIsConnected(true);
-            speak("Connected to server.");
-        });
-
-        socketRef.current.on('disconnect', () => {
-            console.log('❌ Socket disconnected!');
-            setIsConnected(false);
-            speak("Disconnected from server.");
-        });
-
-        socketRef.current.on('navigation_response', (data) => {
-            console.log("Received navigation response:", data);
-            if (data.instructions && data.instructions.length > 0) {
-                console.log("Instructions found:", data.instructions);
-                setNavInstructions(data.instructions);
-                if (data.route_coords) {
-                    console.log("Route coords found:", data.route_coords);
-                    setRouteCoords(data.route_coords);
-                }
-                setCurrentNavStep(0);
-                speak(`Route found. First step: ${data.instructions[0].text}`);
-            } else if (data.instructions && data.instructions.length === 0) {
-                console.log("Route found but no instructions (same location?)");
-                speak("You are already at the destination.");
-                setNavInstructions([]);
-                setRouteCoords([]);
-            } else {
-                console.log("No instructions in response");
-                speak("Sorry, a route could not be found.");
-            }
-        });
-
-
-
-        socketRef.current.on('obstacle_alert', (data) => {
-            if (data.message !== 'Path is clear.') {
-                setObstacleMessage(data.message);
-
-                // Repetition Logic: Only speak the same message up to 2 times
-                if (data.message === lastMsgRef.current) {
-                    if (msgCountRef.current < 2) {
-                        speak(data.message, true);
-                        msgCountRef.current += 1;
-                    }
-                } else {
-                    // New message, reset counter
-                    lastMsgRef.current = data.message;
-                    msgCountRef.current = 1;
-                    speak(data.message, true);
-                }
-            } else {
-                setObstacleMessage('');
-                lastMsgRef.current = '';
-                msgCountRef.current = 0;
-            }
-        });
-
-        socketRef.current.on('context_update', (data) => {
-            speak(data.message, true);
-        });
-
-        socketRef.current.on('surroundings_analysis', (data) => {
-            console.log("Surroundings analysis:", data.message);
-            speak(data.message, true);
-        });
-
-        return () => {
-            if (timer) clearTimeout(timer);
-            navigator.geolocation.clearWatch(watchId);
-            if (socketRef.current) socketRef.current.disconnect();
-            if (requestRef.current) cancelAnimationFrame(requestRef.current);
-        };
-    }, []); // Empty dependency array to run only once on mount
-
-    // Obstacle Detection Loop (Throttled)
-    const lastCaptureTime = useRef(0);
-
-    const captureAndSendForObstacles = useCallback(() => {
-        if (!videoRef.current || !socketRef.current) return;
-
-        const now = Date.now();
-        if (now - lastCaptureTime.current < 2000) { // Run every 2 seconds
-            requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
-            return;
-        }
-        lastCaptureTime.current = now;
-
-        const canvas = document.createElement('canvas');
-        canvas.width = videoRef.current.videoWidth;
-        canvas.height = videoRef.current.videoHeight;
-        canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
-        const imageData = canvas.toDataURL('image/jpeg', 0.5);
-        socketRef.current.emit('process_frame_for_obstacles', { image_data: imageData });
-        requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+    const handleNextStep = useCallback(() => {
+        if (socketRef.current) socketRef.current.emit('voice_command', { text: 'next step' });
     }, []);
 
+    const handlePrevStep = useCallback(() => {
+        if (socketRef.current) socketRef.current.emit('voice_command', { text: 'repeat' });
+    }, []);
+
+    // Gesture Handlers
+    const onTouchEnd = useCallback((e) => {
+        const deltaY = touchY.current - e.changedTouches[0].clientY;
+        const threshold = 50; // Increased sensitivity
+
+        console.log(`☝️ Touch End DeltaY: ${deltaY}`);
+
+        if (Math.abs(deltaY) > threshold) {
+            // Success!
+            if (deltaY > threshold) {
+                console.log("⬆️ NEXT STEP triggered");
+                setStatusText("Next Step...");
+                handleNextStep();
+            } else if (deltaY < -threshold) {
+                console.log("⬇️ PREVIOUS STEP triggered");
+                setStatusText("Previous Step...");
+                handlePrevStep();
+            }
+        }
+    }, [handleNextStep, handlePrevStep]);
+
+    const onTouchStart = useCallback((e) => {
+        touchY.current = e.touches[0].clientY;
+        console.log(`👇 Touch Start Y: ${touchY.current}`);
+    }, []);
+
+    const onTouchMove = useCallback((e) => {
+        if (e.cancelable) e.preventDefault();
+    }, []);
+
+    // Attach Non-Passive Listeners
     useEffect(() => {
-        requestRef.current = requestAnimationFrame(captureAndSendForObstacles);
+        const container = containerRef.current;
+        if (!container) return;
+
+        container.addEventListener('touchstart', onTouchStart, { passive: true });
+        container.addEventListener('touchmove', onTouchMove, { passive: false });
+        container.addEventListener('touchend', onTouchEnd, { passive: false });
+
         return () => {
-            if (requestRef.current) cancelAnimationFrame(requestRef.current);
+            container.removeEventListener('touchstart', onTouchStart);
+            container.removeEventListener('touchmove', onTouchMove);
+            container.removeEventListener('touchend', onTouchEnd);
         };
-    }, [captureAndSendForObstacles]);
+    }, [onTouchStart, onTouchMove, onTouchEnd]);
 
-    // Long Press Logic
-    const longPressTimer = useRef(null);
+    // Continuous Voice Automation
+    const startVoiceAutomation = useCallback(() => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) return;
 
-    const handleTouchStart = () => {
-        longPressTimer.current = setTimeout(() => {
-            speak("Scanning surroundings...", true);
-            // Capture frame immediately
-            if (videoRef.current && socketRef.current) {
+        if (recognitionRef.current) {
+            try { recognitionRef.current.stop(); } catch (e) { }
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'en-US';
+        recognition.continuous = true;
+        recognition.interimResults = false;
+
+        recognition.onstart = () => {
+            setIsListening(true);
+            setSystemState('listening');
+            setStatusText("I am listening...");
+        };
+
+        recognition.onresult = (event) => {
+            const command = event.results[event.results.length - 1][0].transcript.toLowerCase();
+            setStatusText(`Received: "${command}"`);
+            if (socketRef.current) socketRef.current.emit('voice_command', { text: command });
+        };
+
+        recognition.onend = () => {
+            setIsListening(false);
+            if (sessionStarted && !isGreeting) {
+                setTimeout(() => {
+                    try { recognition.start(); } catch (e) { }
+                }, 100);
+            }
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
+    }, [sessionStarted, isGreeting]);
+
+    const handleStartSession = useCallback(() => {
+        if (!sessionStarted) {
+            setSessionStarted(true);
+            setIsGreeting(true);
+            setStatusText("Activating...");
+
+            // 1. Initial Greeting
+            speak("PLEASE SPEAK YOUR DESTINATION AFTER THE BEEP", () => {
+                // 2. Play Beep
+                playBeep();
+                // 3. Start Listening
+                setIsGreeting(false);
+                startVoiceAutomation();
+            });
+
+            // Initialization for Socket and Camera
+            if (navigator.mediaDevices?.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+                    .then(stream => { if (videoRef.current) videoRef.current.srcObject = stream; })
+                    .catch(err => setStatusText("Camera Error"));
+            }
+        }
+    }, [sessionStarted, speak, playBeep, startVoiceAutomation]);
+
+    // AUTO-START ON MOUNT (Accessible Flow)
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            handleStartSession();
+        }, 800); // Give time for transition/socket
+        return () => clearTimeout(timer);
+    }, [handleStartSession]);
+
+    useEffect(() => {
+        socketRef.current = io(SOCKET_URL);
+        socketRef.current.on('connect', () => setIsConnected(true));
+        socketRef.current.on('speak', (data) => {
+            speak(data.text);
+            setStatusText(data.text);
+        });
+        socketRef.current.on('alert_sound', () => playAlertSound());
+        socketRef.current.on('detections_update', (data) => {
+            setDetections(data.detections || []);
+            const hasCritical = data.detections?.some(d => d.urgency === 'CRITICAL');
+            if (hasCritical) setSystemState('critical');
+            else if (data.detections?.length > 0) setSystemState('scanning');
+            else setSystemState('idle');
+        });
+        socketRef.current.on('navigation_status', (status) => {
+            setNavStatus(status);
+        });
+
+        const captureInterval = setInterval(() => {
+            if (sessionStarted && videoRef.current && socketRef.current?.connected) {
                 const canvas = document.createElement('canvas');
-                canvas.width = videoRef.current.videoWidth;
-                canvas.height = videoRef.current.videoHeight;
-                canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
-                const imageData = canvas.toDataURL('image/jpeg', 0.8); // Higher quality for analysis
-                socketRef.current.emit('analyze_surroundings', { image_data: imageData });
+                canvas.width = 300; canvas.height = 300;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(videoRef.current, 0, 0, 300, 300);
+                socketRef.current.emit('process_frame', { image_data: canvas.toDataURL('image/jpeg', 0.5) });
             }
-        }, 800); // 800ms long press
-    };
+        }, 400);
 
-    const handleTouchEnd = () => {
-        if (longPressTimer.current) {
-            clearTimeout(longPressTimer.current);
-        }
-    };
-
-
-    // Helper for distance (Haversine)
-    const getDistanceFromLatLonInMeters = (lat1, lon1, lat2, lon2) => {
-        var R = 6371; // Radius of the earth in km
-        var dLat = (lat2 - lat1) * (Math.PI / 180);
-        var dLon = (lon2 - lon1) * (Math.PI / 180);
-        var a =
-            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-            Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        var d = R * c * 1000; // Distance in meters
-        return d;
-    };
-
-    // Simulation Logic
-    useEffect(() => {
-        let simTimer;
-        if (isSimulating && routeCoords.length > 0) {
-            let simIndex = 0;
-            // Find closest point on route to start simulation from, or just start from beginning
-            // For simplicity, we'll just iterate through the route coords
-            simTimer = setInterval(() => {
-                if (simIndex < routeCoords.length) {
-                    const point = routeCoords[simIndex];
-                    setUserLocation({ lat: point[0], lng: point[1] }); // Leaflet uses [lat, lng]
-                    simIndex++;
-                } else {
-                    setIsSimulating(false);
-                    clearInterval(simTimer);
-                }
-            }, 1000); // Move every 1 second
-        }
-        return () => clearInterval(simTimer);
-    }, [isSimulating, routeCoords]);
-
-    // Check for step progression
-    useEffect(() => {
-        if (navInstructions.length > 0 && currentNavStep < navInstructions.length) {
-            const target = navInstructions[currentNavStep].coords; // [lon, lat] from backend
-            // Backend sends [lon, lat], so target[1] is lat, target[0] is lon
-            const dist = getDistanceFromLatLonInMeters(userLocation.lat, userLocation.lng, target[1], target[0]);
-
-            console.log(`Distance to next waypoint: ${dist.toFixed(1)}m`);
-
-            if (dist < 15) { // 15 meters threshold
-                const nextStep = currentNavStep + 1;
-                if (nextStep < navInstructions.length) {
-                    setCurrentNavStep(nextStep);
-                    speak(navInstructions[nextStep].text, true);
-                } else {
-                    speak("You have arrived at your destination.", true);
-                    setNavInstructions([]);
-                    setRouteCoords([]);
-                    setCurrentNavStep(0);
-                    setIsSimulating(false);
-                }
-            }
-        }
-    }, [userLocation, navInstructions, currentNavStep, speak]);
+        return () => { clearInterval(captureInterval); if (socketRef.current) socketRef.current.disconnect(); };
+    }, [sessionStarted, speak, playAlertSound]);
 
     return (
         <div
-            className="dashboard-container"
-            onTouchStart={handleTouchStart}
-            onTouchEnd={handleTouchEnd}
-            onMouseDown={handleTouchStart} // For mouse testing
-            onMouseUp={handleTouchEnd}
-            onMouseLeave={handleTouchEnd}
+            ref={containerRef}
+            className={`dashboard-container ${!sessionStarted ? 'not-started' : ''}`}
+            onClick={handleStartSession}
         >
-            <div className="connection-status" style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 1000, background: isConnected ? 'green' : 'red', padding: '5px', borderRadius: '5px', color: 'white', fontSize: '12px' }}>
-                {isConnected ? 'Online' : 'Offline'}
-            </div>
-            <video ref={videoRef} autoPlay playsInline muted className="hidden-video" />
+            <video ref={videoRef} autoPlay playsInline muted className="camera-view" />
 
-            <div className="search-bar-container">
-                <div className="search-bar">
-                    <span className="search-icon">🔍</span>
-                    <input type="text" placeholder="Search here" className="search-input" disabled />
-                    <span className={`mic-icon ${isListening ? 'listening' : ''}`} onClick={handleVoiceCommand}>
-                        {isListening ? '🔴' : '🎤'}
-                    </span>
-                </div>
-                <button
-                    onClick={() => {
-                        console.log("Testing route: Entrance -> Architecture");
-                        socketRef.current.emit('get_navigation', { start: 'entrance', end: 'architecture' });
-                    }}
-                    style={{ marginTop: '10px', padding: '5px 10px', background: '#4285F4', color: 'white', border: 'none', borderRadius: '5px' }}
-                >
-                    Test Route
-                </button>
-            </div>
+            <div className={`state-halo ${systemState} ${isListening ? 'listening' : ''}`}></div>
 
-            <div className="map-wrapper">
-                <MapContainer center={[userLocation.lat, userLocation.lng]} zoom={19} scrollWheelZoom={true} style={{ height: '100%', width: '100%' }}>
-                    <TileLayer
-                        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                    />
-                    <Marker position={[userLocation.lat, userLocation.lng]} icon={personIcon}>
-                        <Popup>You are here</Popup>
-                    </Marker>
-
-                    {routeCoords.length > 0 && (
-                        <>
-                            <Polyline
-                                positions={routeCoords}
-                                pathOptions={{ color: '#4285F4', weight: 6, opacity: 0.8 }}
-                            />
-                            {/* Start Point Marker */}
-                            <Marker position={routeCoords[0]}>
-                                <Popup>Start: Entrance</Popup>
-                            </Marker>
-                            {/* End Point Marker */}
-                            <Marker position={routeCoords[routeCoords.length - 1]}>
-                                <Popup>Destination</Popup>
-                            </Marker>
-                        </>
-                    )}
-
-                    <MapUpdater
-                        center={[userLocation.lat, userLocation.lng]}
-                        routeCoords={routeCoords}
-                    />
-                </MapContainer>
-            </div>
-
-            <div className="bottom-sheet">
-                <div className="sheet-handle"></div>
-                <div className="sheet-content">
-                    <h3>{navInstructions.length > 0 ? "Navigation Active" : "Where to?"}</h3>
-                    <p className="status-text">{statusText}</p>
-                    {obstacleMessage && <div className="obstacle-alert">{obstacleMessage}</div>}
-
-                    {navInstructions.length > 0 && (
-                        <div className="nav-step-display">
-                            <span className="direction-icon">⬆️</span>
-                            <span className="instruction-text">{navInstructions[currentNavStep].text}</span>
-                            <div className="step-indicator">Step {currentNavStep + 1} of {navInstructions.length}</div>
-                            <button
-                                onClick={() => {
-                                    const next = currentNavStep + 1;
-                                    if (next < navInstructions.length) {
-                                        setCurrentNavStep(next);
-                                        speak(navInstructions[next].text, true);
-                                    } else {
-                                        speak("You have arrived.", true);
-                                    }
-                                }}
-                                style={{ marginTop: '10px', padding: '8px', background: '#eee', border: 'none', borderRadius: '5px', width: '100%' }}
-                            >
-                                Next Step (Test) ➡️
-                            </button>
+            <div className="vision-hud">
+                {!sessionStarted && (
+                    <div className="start-overlay premium">
+                        <div className="splash-content">
+                            <div className="brain-pulse"></div>
+                            <h1 className="splash-title">Vision Assistant</h1>
+                            <p className="splash-hint">Tap to wake up</p>
                         </div>
-                    )}
+                    </div>
+                )}
+
+                <div className="system-heartbeat">
+                    <div className="heartbeat-inner"></div>
                 </div>
+                {detections.map((det, i) => (
+                    <DetectionRipple key={i} detection={det} index={i} />
+                ))}
+            </div>
+
+            {navStatus.active ? (
+                <div className="navigation-card-premium">
+                    <div className="nav-card-inner">
+                        <div className="nav-icon">📍</div>
+                        <div className="nav-card-text">{navStatus.next_step}</div>
+                        <div className="nav-dist-badge">{Math.round(navStatus.distance_to_step)}m</div>
+                    </div>
+                    <div className="premium-nav-hint">Swipe Up for Next | Down for Repeat</div>
+                </div>
+            ) : (
+                <div className="bottom-sheet premium">
+                    <div className="status-label">{sessionStarted ? (isGreeting ? 'Greeting' : 'Always Listening') : 'Ready'}</div>
+                    <div className="status-text">{statusText}</div>
+                </div>
+            )}
+
+            <div className="connection-status-premium">
+                <span className={`status-dot ${isConnected ? 'live' : 'off'}`}></span>
+                {isConnected ? 'LIVE' : 'OFFLINE'}
             </div>
         </div>
     );
