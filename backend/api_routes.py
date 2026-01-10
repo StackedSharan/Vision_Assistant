@@ -77,14 +77,32 @@ def register_routes(app, socketio, context_manager):
         image_data = data.get('image')  # base64 encoded
         
         if not image_data:
-            return jsonify({'error': 'Image required'}), 400
+            return jsonify({'error': 'Image required', 'detections': []}), 400
         
         try:
             detections = detector.detect(image_data)
-            return jsonify({'detections': detections})
+            
+            # Log detection summary
+            if detections:
+                critical = [d for d in detections if d.get('urgency') == 'CRITICAL']
+                danger = [d for d in detections if d.get('urgency') == 'DANGER']
+                warning = [d for d in detections if d.get('urgency') == 'WARNING']
+                
+                if critical:
+                    names = [d['name'] for d in critical]
+                    dists = [f"{d['distance']}m" if d.get('distance') else '?' for d in critical]
+                    print(f"🚨 CRITICAL: {', '.join([f'{n}({d})' for n, d in zip(names, dists)])}")
+                if danger:
+                    names = [d['name'] for d in danger]
+                    print(f"⚠️ DANGER: {', '.join(names)}")
+                if warning:
+                    names = [d['name'] for d in warning]
+                    print(f"⚠ WARNING: {', '.join(names)}")
+            
+            return jsonify({'detections': detections, 'count': len(detections)})
         except Exception as e:
-            print(f"Detection error: {e}")
-            return jsonify({'error': str(e)}), 400
+            print(f"❌ Detection error: {e}")
+            return jsonify({'error': str(e), 'detections': []}), 400
     
     @app.route('/api/health', methods=['GET'])
     def health():

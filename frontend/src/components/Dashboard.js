@@ -10,20 +10,42 @@ const ObstacleVisualizer = ({ detections }) => {
       {detections.map((det, idx) => {
         const xPos = (det.position_x || 0.5) * 100;
         const distance = det.distance || 5;
-        const isClose = distance < 2;
+        
+        // Color based on urgency level
+        let colorClass = 'safe';
+        let urgencyLabel = 'Safe';
+        if (det.urgency === 'CRITICAL') {
+          colorClass = 'critical';
+          urgencyLabel = '⚠️ CRITICAL';
+        } else if (det.urgency === 'DANGER') {
+          colorClass = 'danger';
+          urgencyLabel = '🚨 DANGER';
+        } else if (det.urgency === 'WARNING') {
+          colorClass = 'warning';
+          urgencyLabel = '⚠️ WARNING';
+        } else if (det.urgency === 'CAUTION') {
+          colorClass = 'caution';
+          urgencyLabel = '⚠ CAUTION';
+        }
 
         return (
           <div
             key={idx}
-            className={`detection-marker ${det.urgency === 'CRITICAL' ? 'critical' : 'warning'}`}
+            className={`detection-marker ${colorClass}`}
             style={{
               left: `${xPos}%`,
               top: '50%',
-              opacity: isClose ? 1 : 0.7,
+              opacity: det.urgency !== 'SAFE' ? 1 : 0.5,
             }}
           >
             <div className="marker-pulse" />
-            <span className="marker-label">{det.name}</span>
+            <div className="marker-content">
+              <span className="marker-label">{det.name}</span>
+              {distance !== null && (
+                <span className="marker-distance">{distance.toFixed(1)}m</span>
+              )}
+              <span className="marker-urgency">{urgencyLabel}</span>
+            </div>
           </div>
         );
       })}
@@ -43,6 +65,79 @@ function Dashboard() {
   const videoRef = useRef(null);
   const socketRef = useRef(null);
   const recognitionRef = useRef(null);
+
+  // Define callbacks BEFORE effects that use them
+  
+  // Text-to-speech
+  const speak = useCallback((text) => {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  // Play alert sound based on distance and urgency
+  const playAlertSound = useCallback((detections) => {
+    if (!detections.length) return;
+    if (!window.AudioContext && !window.webkitAudioContext) return;
+
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // Find most urgent detection
+    const urgencyOrder = { 'CRITICAL': 0, 'DANGER': 1, 'WARNING': 2, 'CAUTION': 3 };
+    const mostUrgent = detections.reduce((prev, curr) => {
+      const prevScore = urgencyOrder[prev.urgency] || 999;
+      const currScore = urgencyOrder[curr.urgency] || 999;
+      return currScore < prevScore ? curr : prev;
+    });
+
+    const distance = mostUrgent.distance || 5;
+    const urgency = mostUrgent.urgency;
+
+    const oscillator = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    oscillator.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    let frequency, duration, volume;
+    
+    if (urgency === 'CRITICAL') {
+      // Very fast urgent beeping
+      frequency = 1000;
+      duration = 0.15;
+      volume = 0.5;
+    } else if (urgency === 'DANGER') {
+      frequency = 800;
+      duration = 0.2;
+      volume = 0.4;
+    } else if (urgency === 'WARNING') {
+      frequency = 600;
+      duration = 0.25;
+      volume = 0.3;
+    } else if (urgency === 'CAUTION') {
+      frequency = 400;
+      duration = 0.3;
+      volume = 0.2;
+    } else {
+      return;
+    }
+
+    oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+
+    oscillator.start(audioCtx.currentTime);
+    oscillator.stop(audioCtx.currentTime + duration);
+
+    // Announce distance if critical
+    if (urgency === 'CRITICAL' || urgency === 'DANGER') {
+      setTimeout(() => {
+        speak(`${mostUrgent.name} at ${distance.toFixed(1)} meters`);
+      }, 300);
+    }
+  }, [speak]);
 
   // Initialize Socket.IO connection
   useEffect(() => {
@@ -112,15 +207,56 @@ function Dashboard() {
     };
   }, []);
 
-  // Text-to-speech
-  const speak = useCallback((text) => {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    window.speechSynthesis.speak(utterance);
-  }, []);
+  // Capture and send frames for object detection
+  useEffect(() => {
+    if (!isConnected) return;
+
+    const captureAndDetect = async () => {
+      try {
+        if (!videoRef.current || videoRef.current.readyState !== videoRef.current.HAVE_ENOUGH_DATA) {
+          return;
+        }
+
+        // Create canvas and draw current frame
+        const canvas = document.createElement('canvas');
+        canvas.width = videoRef.current.videoWidth;
+        canvas.height = videoRef.current.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(videoRef.current, 0, 0);
+
+        // Convert to base64 and send
+        const imageData = canvas.toDataURL('image/jpeg', 0.7);
+
+        const response = await fetch(`${SOCKET_URL}/api/detect-obstacles`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: imageData }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.detections && Array.isArray(data.detections)) {
+            setDetections(data.detections);
+
+            // Play alert only for CRITICAL, DANGER, WARNING, CAUTION items
+            const alertDetections = data.detections.filter(
+              (d) => ['CRITICAL', 'DANGER', 'WARNING', 'CAUTION'].includes(d.urgency)
+            );
+            
+            if (alertDetections.length > 0) {
+              playAlertSound(alertDetections);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Detection error:', err);
+      }
+    };
+
+    // Capture frames every 500ms (2 FPS for detection)
+    const interval = setInterval(captureAndDetect, 500);
+    return () => clearInterval(interval);
+  }, [isConnected, playAlertSound]);
 
   // Voice recognition
   const startListening = useCallback(() => {

@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import os
 import base64
-from .distance import KNOWN_WIDTHS, estimate_distance, classify_urgency
+from .distance import KNOWN_WIDTHS, ALERT_CLASSES, estimate_distance, classify_urgency
 
 # Try to import ultralytics for YOLOv8
 try:
@@ -121,40 +121,60 @@ class ObjectDetector:
     def _detect_yolo(self, frame):
         """Detect using YOLOv8"""
         try:
-            results = self.model(frame, verbose=False)[0]
+            results = self.model(frame, verbose=False, conf=0.5)[0]  # Increase confidence threshold
             detections = []
             
             for box in results.boxes:
                 cls_id = int(box.cls[0])
-                label = results.names[cls_id]
+                label = results.names[cls_id].lower()
                 conf = float(box.conf[0])
                 
-                # Filter by confidence
-                if conf < 0.4:
+                # Only process relevant alert classes
+                if label not in ALERT_CLASSES:
                     continue
                 
-                # Calculate position
+                # Higher confidence threshold for precision
+                if conf < 0.55:
+                    continue
+                
+                # Calculate position and size
                 x1, y1, x2, y2 = box.xyxy[0]
                 center_x = (x1 + x2) / 2.0 / frame.shape[1]
                 pixel_width = float(x2 - x1)
+                pixel_height = float(y2 - y1)
+                
+                # Filter out very small detections (likely noise)
+                min_size = min(frame.shape[0], frame.shape[1]) * 0.02  # 2% of image
+                if pixel_width < min_size or pixel_height < min_size:
+                    continue
                 
                 detection = {
                     'name': label,
-                    'confidence': conf,
-                    'position_x': float(center_x),
+                    'confidence': round(conf, 2),
+                    'position_x': round(float(center_x), 2),
                     'distance': None,
-                    'urgency': 'safe'
+                    'urgency': 'SAFE',
+                    'box': {
+                        'x1': float(x1),
+                        'y1': float(y1),
+                        'x2': float(x2),
+                        'y2': float(y2)
+                    }
                 }
                 
-                # Estimate distance if model available
+                # Estimate distance for known objects
                 if label in KNOWN_WIDTHS:
                     dist = estimate_distance(pixel_width, KNOWN_WIDTHS[label])
-                    detection['distance'] = dist
+                    detection['distance'] = round(dist, 1)
                     detection['urgency'] = classify_urgency(dist)
                 
                 detections.append(detection)
             
-            return sorted(detections, key=lambda x: x.get('distance') or 999)
+            # Sort by distance (nearest first) and filter safe items
+            detections = sorted([d for d in detections if d['urgency'] != 'SAFE'], 
+                              key=lambda x: x.get('distance') or 999)
+            
+            return detections
         
         except Exception as e:
             print(f"❌ YOLO detection error: {e}")
@@ -177,37 +197,59 @@ class ObjectDetector:
             scores = self.interpreter.get_tensor(self.output_details[2]['index'])[0]
             
             detections = []
+            h, w, _ = frame.shape
+            
             for i in range(len(scores)):
-                if scores[i] > 0.4:
+                if scores[i] > 0.55:  # Higher confidence threshold
                     class_id = int(classes[i])
                     if class_id < len(self.labels):
-                        label = self.labels[class_id]
+                        label = self.labels[class_id].lower()
+                        
+                        # Only process relevant alert classes
+                        if label not in ALERT_CLASSES:
+                            continue
                         
                         # Get box coordinates
                         box = boxes[i]
-                        h, w, _ = frame.shape
                         y1, x1, y2, x2 = box
                         x1, y1, x2, y2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
                         
-                        center_x = (x1 + x2) / 2.0 / w
                         pixel_width = x2 - x1
+                        pixel_height = y2 - y1
+                        
+                        # Filter out very small detections
+                        min_size = min(h, w) * 0.02  # 2% of image
+                        if pixel_width < min_size or pixel_height < min_size:
+                            continue
+                        
+                        center_x = (x1 + x2) / 2.0 / w
                         
                         detection = {
                             'name': label,
-                            'confidence': float(scores[i]),
-                            'position_x': float(center_x),
+                            'confidence': round(float(scores[i]), 2),
+                            'position_x': round(float(center_x), 2),
                             'distance': None,
-                            'urgency': 'safe'
+                            'urgency': 'SAFE',
+                            'box': {
+                                'x1': x1,
+                                'y1': y1,
+                                'x2': x2,
+                                'y2': y2
+                            }
                         }
                         
                         if label in KNOWN_WIDTHS:
                             dist = estimate_distance(pixel_width, KNOWN_WIDTHS[label])
-                            detection['distance'] = dist
+                            detection['distance'] = round(dist, 1)
                             detection['urgency'] = classify_urgency(dist)
                         
                         detections.append(detection)
             
-            return sorted(detections, key=lambda x: x.get('distance') or 999)
+            # Sort by distance and filter safe items
+            detections = sorted([d for d in detections if d['urgency'] != 'SAFE'], 
+                              key=lambda x: x.get('distance') or 999)
+            
+            return detections
         
         except Exception as e:
             print(f"❌ TFLite detection error: {e}")
