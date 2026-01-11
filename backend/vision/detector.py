@@ -119,9 +119,16 @@ class ObjectDetector:
             return []
     
     def _detect_yolo(self, frame):
-        """Detect using YOLOv8"""
+        """Detect using YOLOv8 with real-time optimization"""
         try:
-            results = self.model(frame, verbose=False, conf=0.45)[0]
+            # Aggressive frame resizing for speed (480p max)
+            h, w = frame.shape[:2]
+            if w > 480:
+                scale = 480 / w
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+            
+            # Fast inference with reduced confidence threshold
+            results = self.model(frame, verbose=False, conf=0.25)[0]
             detections = []
             
             for box in results.boxes:
@@ -129,9 +136,12 @@ class ObjectDetector:
                 label = results.names[cls_id].lower()
                 conf = float(box.conf[0])
                 
-                # Accept all objects with minimum confidence
-                if conf < 0.45:
+                # Accept objects with lower confidence for real-time detection
+                if conf < 0.25:
                     continue
+                
+                # Map object names to standardized names
+                label = self._normalize_label(label)
                 
                 # Calculate position and size
                 x1, y1, x2, y2 = box.xyxy[0]
@@ -139,9 +149,8 @@ class ObjectDetector:
                 pixel_width = float(x2 - x1)
                 pixel_height = float(y2 - y1)
                 
-                # Filter out very small detections (likely noise)
-                min_size = min(frame.shape[0], frame.shape[1]) * 0.02  # 2% of image
-                if pixel_width < min_size or pixel_height < min_size:
+                # Filter out very small noise (less than 3 pixels)
+                if pixel_width < 3 or pixel_height < 3:
                     continue
                 
                 detection = {
@@ -161,12 +170,12 @@ class ObjectDetector:
                 # Estimate distance for known objects
                 if label in KNOWN_WIDTHS:
                     dist = estimate_distance(pixel_width, KNOWN_WIDTHS[label])
-                    detection['distance'] = round(dist, 1)
+                    detection['distance'] = round(dist, 2)
                     detection['urgency'] = classify_urgency(dist)
                 
                 detections.append(detection)
             
-            # Sort by distance (nearest first) - return ALL detections
+            # Sort by distance (nearest first)
             detections = sorted(detections, 
                               key=lambda x: x.get('distance') or 999)
             
@@ -175,6 +184,180 @@ class ObjectDetector:
         except Exception as e:
             print(f"❌ YOLO detection error: {e}")
             return []
+    
+    def _normalize_label(self, label):
+        """Normalize object labels to match KNOWN_WIDTHS keys.
+        
+        Maps various YOLO output labels to standardized names for distance estimation.
+        """
+        label = label.strip().lower()
+        
+        # Direct mappings for common variations
+        label_mappings = {
+            # Phones/Mobile
+            'cell phone': 'cell phone',
+            'cellphone': 'cell phone',
+            'mobile': 'mobile phone',
+            'mobile phone': 'mobile phone',
+            'iphone': 'cell phone',
+            'smartphone': 'cell phone',
+            'phone': 'cell phone',
+            
+            # People/Body parts
+            'person': 'person',
+            'human': 'person',
+            'people': 'person',
+            'man': 'person',
+            'woman': 'person',
+            'child': 'person',
+            'adult': 'person',
+            'hand': 'hand',
+            'hands': 'hand',
+            'face': 'face',
+            'head': 'head',
+            'arm': 'arm',
+            'leg': 'leg',
+            'body': 'person',
+            
+            # Containers/Bottles
+            'bottle': 'bottle',
+            'bottles': 'bottle',
+            'water bottle': 'bottle',
+            'wine bottle': 'bottle',
+            'cup': 'cup',
+            'cups': 'cup',
+            'mug': 'cup',
+            'glass': 'cup',
+            'can': 'bottle',
+            
+            # Electronics/Computers
+            'keyboard': 'keyboard',
+            'mouse': 'mouse',
+            'laptop': 'laptop',
+            'monitor': 'monitor',
+            'screen': 'monitor',
+            'computer': 'laptop',
+            'tv': 'monitor',
+            'television': 'monitor',
+            
+            # Books/Paper
+            'book': 'book',
+            'books': 'book',
+            'paper': 'book',
+            
+            # Bags/Luggage
+            'backpack': 'backpack',
+            'handbag': 'handbag',
+            'purse': 'handbag',
+            'suitcase': 'suitcase',
+            'luggage': 'suitcase',
+            'bag': 'backpack',
+            'bags': 'backpack',
+            
+            # Furniture
+            'chair': 'chair',
+            'chairs': 'chair',
+            'bench': 'bench',
+            'table': 'table',
+            'tables': 'table',
+            'desk': 'desk',
+            'bed': 'bed',
+            'couch': 'table',
+            'sofa': 'table',
+            
+            # Doors/Windows
+            'door': 'door',
+            'doors': 'door',
+            'window': 'window',
+            'windows': 'window',
+            'cabinet': 'cabinet',
+            'shelf': 'shelf',
+            'shelves': 'shelf',
+            
+            # Outdoor
+            'tree': 'tree',
+            'trees': 'tree',
+            'plant': 'potted plant',
+            'plants': 'potted plant',
+            'potted plant': 'potted plant',
+            'bush': 'tree',
+            'pole': 'pole',
+            'poles': 'pole',
+            'lamppost': 'lamppost',
+            'street light': 'lamppost',
+            'traffic light': 'traffic light',
+            'fire hydrant': 'fire hydrant',
+            'parking meter': 'parking meter',
+            'sign': 'pole',
+            'fence': 'fence',
+            'gate': 'gate',
+            'wall': 'wall',
+            'barrier': 'fence',
+            'ramp': 'table',
+            'stairs': 'table',
+            'steps': 'table',
+            'curb': 'pole',
+            
+            # Vehicles
+            'car': 'car',
+            'cars': 'car',
+            'automobile': 'car',
+            'vehicle': 'car',
+            'motorcycle': 'motorcycle',
+            'motorcycles': 'motorcycle',
+            'motorbike': 'motorcycle',
+            'bus': 'bus',
+            'buses': 'bus',
+            'truck': 'truck',
+            'trucks': 'truck',
+            'bicycle': 'bicycle',
+            'bicycles': 'bicycle',
+            'bike': 'bicycle',
+            'scooter': 'scooter',
+            'skateboard': 'skateboard',
+            'skateboard': 'skateboard',
+            'trolley': 'cart',
+            'cart': 'skateboard',
+            
+            # Animals
+            'dog': 'dog',
+            'dogs': 'dog',
+            'puppy': 'dog',
+            'cat': 'cat',
+            'cats': 'cat',
+            'kitten': 'cat',
+            'bird': 'bird',
+            'birds': 'bird',
+            'horse': 'horse',
+            'horses': 'horse',
+            'cow': 'cow',
+            'cows': 'cow',
+            'sheep': 'sheep',
+            'animal': 'dog',
+            'animals': 'dog',
+            
+            # Sports/Toys
+            'sports ball': 'sports ball',
+            'ball': 'sports ball',
+            'basketball': 'sports ball',
+            'soccer ball': 'sports ball',
+            'baseball': 'baseball',
+            'tennis ball': 'tennis ball',
+            'baseball bat': 'baseball bat',
+            'baseball glove': 'baseball glove',
+            'kite': 'kite',
+            'toy': 'sports ball',
+            'toys': 'sports ball',
+            'box': 'table',
+            'boxes': 'table',
+            
+            # Buildings
+            'building': 'building',
+            'buildings': 'building',
+        }
+        
+        # Return mapped label if exists, otherwise return original
+        return label_mappings.get(label, label)
     
     def _detect_tflite(self, frame):
         """Detect using TensorFlow Lite"""

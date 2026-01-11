@@ -113,7 +113,14 @@ function Dashboard() {
   const [obstacleDetectionActive, setObstacleDetectionActive] = useState(false);
   const [lastAlertTime, setLastAlertTime] = useState(0);
   const [lastAlertedObject, setLastAlertedObject] = useState('');
+  const [isFirstInstructionSpeaking, setIsFirstInstructionSpeaking] = useState(false);
+  const pendingDistantAlertRef = useRef(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  // NEW: Alert level for visual feedback
+  const [alertLevel, setAlertLevel] = useState(null); // 'CRITICAL' | 'DANGER' | 'WARNING' | null
+  const alertVisualTimeoutRef = useRef(null);
+  // NEW: Flag to prevent detection blocking during instruction playback
+  const isDetectingRef = useRef(false);
 
   const videoRef = useRef(null);
   const socketRef = useRef(null);
@@ -243,10 +250,27 @@ function Dashboard() {
       }
     }
     
-    // Update current instruction for display
-    setCurrentInstruction(text);
+    // Note: currentInstruction should already be set by the caller
+    // to keep screen and audio in sync
+    console.log('🗣️ Speaking instruction:', text.substring(0, 50));
     
     speak(text, false, () => {
+      // After instruction finishes, check if this was first instruction
+      setIsFirstInstructionSpeaking(false);
+      
+      // Check if there's a pending distant alert to announce
+      if (pendingDistantAlertRef.current && isNavigating && !isPlayingAlertRef.current) {
+        console.log('📢 Announcing pending obstacle after instruction');
+        const obstacleToAnnounce = pendingDistantAlertRef.current;
+        pendingDistantAlertRef.current = null;
+        
+        // IMPORTANT: Announce obstacle WITHOUT alert flag (isAlert=false)
+        // This prevents it from interfering with instruction state
+        setTimeout(() => {
+          speak(obstacleToAnnounce, false);
+        }, 500);
+      }
+      
       // Resume recognition after instruction
       setTimeout(() => {
         if (recognitionRef.current && isNavigating) {
@@ -268,6 +292,12 @@ function Dashboard() {
     socketRef.current.on('connect', () => {
       console.log('✅ Connected to server');
       setIsConnected(true);
+      
+      // Check backend health
+      fetch(`${SOCKET_URL}/api/health`)
+        .then(res => res.json())
+        .then(data => console.log('🏥 Backend health:', data))
+        .catch(err => console.error('🏥 Backend health check failed:', err));
     });
 
     socketRef.current.on('disconnect', () => {
@@ -395,11 +425,15 @@ function Dashboard() {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.onloadedmetadata = () => {
-            videoRef.current.play().catch(err => console.error('Play error:', err));
+            console.log('📹 Camera metadata loaded:', videoRef.current.videoWidth, 'x', videoRef.current.videoHeight);
+            videoRef.current.play().catch(err => console.error('❌ Play error:', err));
+          };
+          videoRef.current.onplay = () => {
+            console.log('🎥 Camera stream started playing');
           };
         }
       } catch (err) {
-        console.error('Camera error:', err);
+        console.error('❌ Camera error:', err);
         alert('Camera permission denied. Please allow camera access.');
       }
     };
@@ -408,6 +442,7 @@ function Dashboard() {
 
     return () => {
       if (videoRef.current && videoRef.current.srcObject) {
+        console.log('📹 Stopping camera stream');
         videoRef.current.srcObject.getTracks().forEach((track) => track.stop());
       }
     };
@@ -438,101 +473,211 @@ function Dashboard() {
 
   // Obstacle detection during navigation
   useEffect(() => {
-    if (!isNavigating || !obstacleDetectionActive || !videoRef.current) return;
+    if (!isNavigating || !obstacleDetectionActive || !videoRef.current) {
+      console.log('🛑 Obstacle detection paused:', { isNavigating, obstacleDetectionActive, hasVideo: !!videoRef.current });
+      return;
+    }
+    
+    // Don't detect during first instruction - user needs to focus on initial direction
+    if (isFirstInstructionSpeaking) {
+      console.log('⏸️ Obstacle detection paused during first instruction');
+      return;
+    }
+
+    // SKIP DETECTION WHILE SPEAKING - keep instructions smooth
+    if (isSpeaking) {
+      return; // Silently skip, don't log to reduce console spam
+    }
+
+    let detectionCount = 0;
+    let lastDetectionLog = Date.now();
 
     const captureAndDetectObstacles = async () => {
       try {
-        if (!videoRef.current || videoRef.current.readyState !== videoRef.current.HAVE_ENOUGH_DATA) {
+        detectionCount++;
+        
+        // NOTE: Removed isDetectingRef blocking - allow frames to process in parallel
+        // for truly real-time detection
+        
+        // Log every 10 attempts
+        if (Date.now() - lastDetectionLog > 10000) {
+          console.log(`🔄 Obstacle detection running (attempt #${detectionCount})...`);
+          lastDetectionLog = Date.now();
+        }
+
+        if (!videoRef.current) {
+          console.warn('⚠️ Video reference lost');
+          return;
+        }
+
+        // Check video is playing and has data
+        if (videoRef.current.readyState < 2) {
+          console.log('⏳ Video not ready yet, readyState:', videoRef.current.readyState);
+          return;
+        }
+
+        // Get video dimensions
+        const width = videoRef.current.videoWidth;
+        const height = videoRef.current.videoHeight;
+        
+        if (width === 0 || height === 0) {
+          console.warn('⚠️ Video dimensions not available yet');
           return;
         }
 
         const canvas = document.createElement('canvas');
-        canvas.width = videoRef.current.videoWidth;
-        canvas.height = videoRef.current.videoHeight;
+        canvas.width = width;
+        canvas.height = height;
         const ctx = canvas.getContext('2d');
-        ctx.drawImage(videoRef.current, 0, 0);
+        
+        if (!ctx) {
+          console.error('❌ Could not get canvas context');
+          return;
+        }
 
-        const imageData = canvas.toDataURL('image/jpeg', 0.7);
+        ctx.drawImage(videoRef.current, 0, 0);
+        // Ultra-low quality (0.3) for fastest real-time processing
+        const imageData = canvas.toDataURL('image/jpeg', 0.3);
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000); // 2 second timeout
 
         const response = await fetch(`${SOCKET_URL}/api/detect-obstacles`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ image: imageData }),
+          signal: controller.signal
         });
 
-        if (response.ok) {
-          const data = await response.json();
-          if (data.detections && data.detections.length > 0) {
-            // Get most urgent detection
-            const urgencyOrder = { 'CRITICAL': 0, 'DANGER': 1, 'WARNING': 2, 'CAUTION': 3 };
-            const mostUrgent = data.detections.reduce((prev, curr) => {
-              const prevScore = urgencyOrder[prev.urgency] || 999;
-              const currScore = urgencyOrder[curr.urgency] || 999;
-              return currScore < prevScore ? curr : prev;
-            });
+        clearTimeout(timeout);
 
-            const now = Date.now();
-            const distance = mostUrgent.distance || 5;
-            const objectName = mostUrgent.name || 'object';
-            const timeSinceLastAlert = now - lastAlertTime;
+        if (!response.ok) {
+          console.error(`❌ API error: ${response.status}`);
+          return;
+        }
 
-            console.log(`🔍 Detection: ${objectName} at ${distance.toFixed(2)}m, urgency: ${mostUrgent.urgency}`);
+        const data = await response.json();
+        
+        // Log less frequently to reduce spam
+        if (detectionCount % 5 === 0) {
+          console.log(`🔍 Detection: ${data.count} objects`);
+        }
 
-            // CRITICAL: Very close obstacle (< 0.2m) - RED ALERT
-            if (distance < 0.2) {
-              if (timeSinceLastAlert > 10000) { // 10 second cooldown for proximity
-                console.log('🚨🚨🚨 CRITICAL PROXIMITY ALERT - OBSTACLE TOO CLOSE!');
-                
-                // Speak the warning 3 times with pauses
-                const speakCriticalWarning = (times) => {
-                  if (times <= 0) {
-                    console.log('✅ Critical alert sequence completed');
-                    isPlayingAlertRef.current = false;
-                    return;
-                  }
-                  
-                  isPlayingAlertRef.current = true;
-                  const warningText = 'Warning obstacle ahead please stop';
-                  
-                  speak(warningText, true, () => {
-                    console.log(`⏱ Critical alert ${4 - times}/3 - pausing before next...`);
-                    // Wait 2 seconds before repeating
-                    setTimeout(() => {
-                      speakCriticalWarning(times - 1);
-                    }, 2000);
-                  });
-                };
-                
-                speakCriticalWarning(3); // Say it 3 times
-                setLastAlertTime(now);
-                setLastAlertedObject(objectName);
+        if (data.detections && data.detections.length > 0) {
+          // Get most urgent detection
+          const urgencyOrder = { 'CRITICAL': 0, 'DANGER': 1, 'WARNING': 2, 'CAUTION': 3 };
+          const mostUrgent = data.detections.reduce((prev, curr) => {
+            const prevScore = urgencyOrder[prev.urgency] || 999;
+            const currScore = urgencyOrder[curr.urgency] || 999;
+            return currScore < prevScore ? curr : prev;
+          });
+
+          const now = Date.now();
+          const distance = mostUrgent.distance || 5;
+          const objectName = mostUrgent.name || 'object';
+          const timeSinceLastAlert = now - lastAlertTime;
+
+          // Less frequent logging
+          if (detectionCount % 5 === 0) {
+            console.log(`🔍 ${objectName} at ${distance.toFixed(2)}m`);
+          }
+
+          // CRITICAL: Very close obstacle (< 0.2m) - IMMEDIATE RED ALERT
+          if (distance < 0.2) {
+            if (timeSinceLastAlert > 10000) { // 10 second cooldown
+              console.log(`🚨🚨🚨 CRITICAL ALERT - ${objectName.toUpperCase()} VERY CLOSE (${distance.toFixed(2)}m)`);
+              
+              // Set visual alert level
+              setAlertLevel('CRITICAL');
+              if (alertVisualTimeoutRef.current) clearTimeout(alertVisualTimeoutRef.current);
+              
+              // IMMEDIATELY CANCEL all ongoing speech synthesis for instant interrupt
+              if (window.speechSynthesis) {
+                window.speechSynthesis.cancel();
+                console.log('🛑 EMERGENCY: Cancelled all ongoing speech');
               }
-            } 
-            // Other obstacles - Standard Alert (5 second cooldown)
-            else if (distance > 0.2 && distance < 5) {
-              if (timeSinceLastAlert > 5000 && lastAlertedObject !== objectName) {
-                const alertMessage = `There is a ${objectName.toLowerCase()} in front of you at about ${distance.toFixed(1)} meters away`;
-                console.log(`⚠️ OBSTACLE ALERT: ${alertMessage}`);
+              
+              // Speak the critical warning 3 times with 2-second pauses
+              const speakCriticalWarning = (times) => {
+                if (times <= 0) {
+                  console.log('✅ Critical alert sequence completed');
+                  isPlayingAlertRef.current = false;
+                  // Clear critical alert visual after sequence
+                  setAlertLevel(null);
+                  return;
+                }
                 
-                speak(alertMessage, true, () => {
-                  console.log('Alert completed, resuming navigation');
+                isPlayingAlertRef.current = true;
+                // More specific: include object type
+                let warningText = 'Please stop ';
+                if (objectName === 'person') {
+                  warningText += 'person ahead, please stop person ahead, stop stop stop';
+                } else if (['car', 'motorcycle', 'bus', 'truck'].includes(objectName)) {
+                  warningText += 'vehicle ahead, please stop vehicle ahead, stop stop stop';
+                } else {
+                  warningText += 'obstacle ahead, please stop obstacle ahead, stop stop stop';
+                }
+                
+                speak(warningText, true, () => {
+                  console.log(`⏱ Critical alert ${4 - times}/3...`);
+                  setTimeout(() => {
+                    speakCriticalWarning(times - 1);
+                  }, 2000);
                 });
-                
-                setLastAlertTime(now);
-                setLastAlertedObject(objectName);
-              }
+              };
+              
+              speakCriticalWarning(3); // Say it 3 times
+              setLastAlertTime(now);
+              setLastAlertedObject(objectName);
+            } else {
+              console.log(`⏳ Critical cooldown: ${((10000 - timeSinceLastAlert)/1000).toFixed(1)}s remaining`);
+            }
+          } 
+          // DANGER: Near obstacle (0.2-0.35m) - Announce AFTER instruction finishes
+          else if (distance >= 0.2 && distance < 0.35) {
+            if (timeSinceLastAlert > 5000) { // 5 second cooldown (NO yellow animation)
+              console.log(`⚠️ DANGER: ${objectName} at ${distance.toFixed(2)}m`);
+              
+              // Queue announcement for after instruction finishes
+              const distanceStr = distance.toFixed(2);
+              pendingDistantAlertRef.current = `${objectName.charAt(0).toUpperCase() + objectName.slice(1)} is ${distanceStr} meters in front`;
+              
+              setLastAlertTime(now);
+              setLastAlertedObject(objectName);
+            } else {
+              console.log(`⏳ Cooldown: ${((5000 - timeSinceLastAlert)/1000).toFixed(1)}s remaining`);
             }
           }
+          // WARNING: Distant obstacle (0.35-5m) - Queue announcement, no visual alert
+          else if (distance >= 0.35 && distance < 5) {
+            // Queue this alert to be announced after instruction finishes (no yellow animation)
+            if (timeSinceLastAlert > 5000) {
+              const distanceStr = distance < 1 ? distance.toFixed(2) : distance.toFixed(1);
+              pendingDistantAlertRef.current = `${objectName.charAt(0).toUpperCase() + objectName.slice(1)} is about ${distanceStr} meters away`;
+              console.log(`📍 Obstacle queued for announcement: ${pendingDistantAlertRef.current}`);
+              setLastAlertTime(now);
+            }
+          }
+        } else {
+          console.log('✅ No obstacles detected - path clear');
         }
       } catch (err) {
-        console.error('Obstacle detection error:', err);
+        console.error('❌ Obstacle detection error:', err);
+      } finally {
+        // Always clear the detecting flag to prevent permanent blocking
+        isDetectingRef.current = false;
       }
     };
 
-    // Capture obstacle frames every 1000ms (1 FPS for detection)
-    const interval = setInterval(captureAndDetectObstacles, 1000);
-    return () => clearInterval(interval);
-  }, [isNavigating, obstacleDetectionActive, lastAlertTime, lastAlertedObject, speak]);
+    console.log('🟢 Starting obstacle detection (REAL-TIME MODE - every 400ms)');
+    // Capture frames every 400ms (2.5 FPS) - parallel processing for real-time detection
+    const interval = setInterval(captureAndDetectObstacles, 400);
+    
+    return () => {
+      console.log('🛑 Stopping obstacle detection loop');
+      clearInterval(interval);
+    };
+  }, [isNavigating, obstacleDetectionActive, lastAlertTime, lastAlertedObject, isFirstInstructionSpeaking, speak]);
 
   // Handle start navigation
   const handleStartNavigation = useCallback((location) => {
@@ -583,6 +728,8 @@ function Dashboard() {
               setShowPopup(true);
               
               // Step 4: Speak the first instruction with guidance after brief pause
+              // Flag that first instruction is being spoken - pause obstacle detection
+              setIsFirstInstructionSpeaking(true);
               setTimeout(() => {
                 speakInstruction(guidedInstruction);
               }, 500);
@@ -618,8 +765,14 @@ function Dashboard() {
       .then((res) => res.json())
       .then((data) => {
         console.log('Next instruction:', data.instruction);
+        // Clear any stale paused instruction reference
+        pausedInstructionRef.current = null;
+        // IMPORTANT: Set screen text FIRST, then speak
         setCurrentInstruction(data.instruction);
-        speakInstruction(data.instruction);
+        // Small delay to ensure state update before speaking
+        setTimeout(() => {
+          speakInstruction(data.instruction);
+        }, 50);
         
         // Check if we've reached the destination
         if (data.instruction && data.instruction.toLowerCase().includes('reached your destination')) {
@@ -660,8 +813,14 @@ function Dashboard() {
       .then((res) => res.json())
       .then((data) => {
         console.log('Previous instruction:', data.instruction);
+        // Clear any stale paused instruction reference
+        pausedInstructionRef.current = null;
+        // IMPORTANT: Set screen text FIRST, then speak
         setCurrentInstruction(data.instruction);
-        speakInstruction(data.instruction);
+        // Small delay to ensure state update before speaking
+        setTimeout(() => {
+          speakInstruction(data.instruction);
+        }, 50);
       })
       .catch((err) => console.error('Prev step error:', err));
   }, [isNavigating, speakInstruction]);
@@ -707,6 +866,30 @@ function Dashboard() {
         muted
         playsInline
       />
+
+      {/* RED ALERT OVERLAY - ONLY FOR CRITICAL OBSTACLES */}
+      {alertLevel === 'CRITICAL' && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            backgroundColor: 'rgba(255, 0, 0, 0.5)',
+            pointerEvents: 'none',
+            animation: 'pulse-critical 0.3s infinite',
+            zIndex: 1000
+          }}
+        >
+          <style>{`
+            @keyframes pulse-critical {
+              0%, 100% { opacity: 0.7; }
+              50% { opacity: 0.3; }
+            }
+          `}</style>
+        </div>
+      )}
 
       <div className="instruction-panel">
         <div className="instruction-text">{currentInstruction}</div>
