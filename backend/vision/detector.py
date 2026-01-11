@@ -121,7 +121,7 @@ class ObjectDetector:
     def _detect_yolo(self, frame):
         """Detect using YOLOv8"""
         try:
-            results = self.model(frame, verbose=False, conf=0.5)[0]  # Increase confidence threshold
+            results = self.model(frame, verbose=False, conf=0.45)[0]
             detections = []
             
             for box in results.boxes:
@@ -129,12 +129,8 @@ class ObjectDetector:
                 label = results.names[cls_id].lower()
                 conf = float(box.conf[0])
                 
-                # Only process relevant alert classes
-                if label not in ALERT_CLASSES:
-                    continue
-                
-                # Higher confidence threshold for precision
-                if conf < 0.55:
+                # Accept all objects with minimum confidence
+                if conf < 0.45:
                     continue
                 
                 # Calculate position and size
@@ -170,8 +166,8 @@ class ObjectDetector:
                 
                 detections.append(detection)
             
-            # Sort by distance (nearest first) and filter safe items
-            detections = sorted([d for d in detections if d['urgency'] != 'SAFE'], 
+            # Sort by distance (nearest first) - return ALL detections
+            detections = sorted(detections, 
                               key=lambda x: x.get('distance') or 999)
             
             return detections
@@ -200,14 +196,12 @@ class ObjectDetector:
             h, w, _ = frame.shape
             
             for i in range(len(scores)):
-                if scores[i] > 0.55:  # Higher confidence threshold
+                if scores[i] > 0.45:  # Lower confidence threshold to catch more objects
                     class_id = int(classes[i])
                     if class_id < len(self.labels):
                         label = self.labels[class_id].lower()
                         
-                        # Only process relevant alert classes
-                        if label not in ALERT_CLASSES:
-                            continue
+                        # Accept all objects
                         
                         # Get box coordinates
                         box = boxes[i]
@@ -245,8 +239,8 @@ class ObjectDetector:
                         
                         detections.append(detection)
             
-            # Sort by distance and filter safe items
-            detections = sorted([d for d in detections if d['urgency'] != 'SAFE'], 
+            # Sort by distance and return ALL detections
+            detections = sorted(detections, 
                               key=lambda x: x.get('distance') or 999)
             
             return detections

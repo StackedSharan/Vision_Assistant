@@ -358,11 +358,132 @@ html, body, #root, .App {
   flex-wrap: wrap;
 }
 
+.mode-selector {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.mode-selection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  padding: 15px;
+  background: rgba(0, 198, 255, 0.05);
+  border-radius: 8px;
+  border: 2px solid rgba(0, 198, 255, 0.3);
+}
+
+.mode-selection button {
+  min-width: 200px;
+}
+
+.object-list-panel {
+  padding: 15px;
+  background: rgba(0, 255, 136, 0.05);
+  border-radius: 8px;
+  border: 2px solid rgba(0, 255, 136, 0.3);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.objects-display {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.object-chip {
+  background: rgba(0, 255, 136, 0.2);
+  border: 1px solid rgba(0, 255, 136, 0.6);
+  padding: 8px 12px;
+  border-radius: 20px;
+  font-size: 0.9rem;
+  color: #00ff88;
+  white-space: nowrap;
+}
+
 .navigation-controls {
   display: flex;
   gap: 10px;
   justify-content: center;
   align-items: center;
+}
+
+.seeking-controls {
+  display: flex;
+  gap: 15px;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+}
+
+.tracking-controls {
+  display: flex;
+  gap: 15px;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+  padding: 15px;
+  background: rgba(0, 255, 136, 0.05);
+  border-radius: 8px;
+  border: 2px solid rgba(0, 255, 136, 0.3);
+}
+
+.seeking-status {
+  font-size: 1.1rem;
+  color: #00c6ff;
+  font-weight: 600;
+  text-shadow: 0 0 10px rgba(0, 198, 255, 0.5);
+}
+
+.tracking-status {
+  font-size: 1.2rem;
+  font-weight: 700;
+  text-shadow: 0 0 10px rgba(0, 255, 136, 0.6);
+  animation: pulse 2s infinite;
+}
+
+.tracking-instruction {
+  font-size: 0.95rem;
+  color: #00ff88;
+  padding: 10px 15px;
+  background: rgba(0, 255, 136, 0.1);
+  border-left: 3px solid #00ff88;
+  border-radius: 4px;
+  margin: 10px 0;
+  text-align: center;
+}
+
+.track-btn {
+  background: linear-gradient(135deg, #ff6b00, #ff9000);
+  box-shadow: 0 0 15px rgba(255, 107, 0, 0.6);
+}
+
+.track-btn:hover:not(:disabled) {
+  box-shadow: 0 0 25px rgba(255, 107, 0, 0.9);
+  transform: translateY(-2px);
+}
+
+.track-btn {
+  background: linear-gradient(135deg, #ff8800, #ff6600);
+  box-shadow: 0 0 15px rgba(255, 136, 0, 0.6);
+}
+
+.track-btn:hover:not(:disabled) {
+  box-shadow: 0 0 25px rgba(255, 136, 0, 0.9);
+}
+
+.nav-btn {
+  background: linear-gradient(135deg, #0072ff, #0052cc);
+  box-shadow: 0 0 15px rgba(0, 114, 255, 0.6);
+}
+
+.nav-btn:hover:not(:disabled) {
+  box-shadow: 0 0 25px rgba(0, 114, 255, 0.9);
 }
 
 /* ====== Buttons ====== */
